@@ -1,0 +1,975 @@
+
+import { useState, useEffect, useMemo } from 'react'
+import ImageWithBasePath from '../../../core/common/imageWithBasePath'
+import { Link } from 'react-router-dom'
+import { all_routes } from '../../router/all_routes'
+import { paymentType } from '../../../core/common/selectoption/selectoption'
+import { DatePicker } from 'antd'
+import type { Dayjs } from 'dayjs'
+import dayjs from "dayjs"
+import Select from 'react-select'
+import type { SingleValue } from 'react-select'
+import { apiService } from '../../../core/services/apiService'
+import { useLeaveTypes } from '../../../core/hooks/useLeaveTypes'
+import { useAcademicYears } from '../../../core/hooks/useAcademicYears'
+import { useFeeStructures } from '../../../core/hooks/useFeeStructures'
+import { useStudentFees } from '../../../core/hooks/useStudentFees'
+import { selectSelectedAcademicYearId } from '../../../core/data/redux/academicYearSlice'
+import Swal from 'sweetalert2'
+import { useSelector } from 'react-redux'
+import { generateFeeReceipt } from '../../../core/utils/pdfReceiptGenerator'
+import { isTeacherRole } from '../../../core/utils/roleUtils'
+import { selectUser } from '../../../core/data/redux/authSlice'
+
+interface StudentModalsProps {
+  studentId?: number | null
+  onLeaveApplied?: () => void
+  /** Student object for Add Fees modal - real data instead of dummy */
+  student?: { id?: number; admission_number?: string; first_name?: string; last_name?: string; class_name?: string; section_name?: string; photo_url?: string | null } | null
+  /** Fee data from useStudentFees - array of detailed status */
+  feeData?: any[] | null
+  /** Callback after fee collected successfully */
+  onFeeCollected?: () => void
+  /** Callback after student deleted successfully */
+  onStudentDeleted?: () => void
+}
+
+const StudentModals = ({ studentId, onLeaveApplied, student, feeData, onFeeCollected, onStudentDeleted }: StudentModalsProps) => {
+  const routes = all_routes
+  const academicYearId = useSelector(selectSelectedAcademicYearId);
+  const user = useSelector(selectUser);
+  const isTeacher = isTeacherRole(user);
+
+  const today = new Date()
+  const year = today.getFullYear()
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  const formattedDate = `${month}-${day}-${year}`
+  const defaultValue = dayjs(formattedDate)
+
+  const { leaveTypes } = useLeaveTypes({ applicableFor: 'student' })
+  const { academicYears } = useAcademicYears()
+  const leaveTypeOptions = leaveTypes.length > 0 ? leaveTypes : []
+  const { feeStructures } = useFeeStructures()
+
+  const { data: fetchedFeeData } = useStudentFees(student?.id ?? null, academicYearId)
+  const effectiveFeeData = (feeData ?? fetchedFeeData ?? []) as any[]
+
+  const [applyLeaveType, setApplyLeaveType] = useState<SingleValue<{ value: string; label: string }>>(null)
+  const [applyFromDate, setApplyFromDate] = useState<Dayjs | null>(null)
+  const [applyToDate, setApplyToDate] = useState<Dayjs | null>(null)
+  const [applyReason, setApplyReason] = useState('')
+  const [applyDocument, setApplyDocument] = useState<File | null>(null)
+  const [applySubmitting, setApplySubmitting] = useState(false)
+  const [applyError, setApplyError] = useState<string | null>(null)
+  const getModalContainer = () => document.body;
+  const todayStart = dayjs().startOf("day");
+
+  // Add Fees form state
+  const [feeStructureId, setFeeStructureId] = useState<string>('')
+  const [amountPaid, setAmountPaid] = useState<string>('')
+  const [collectionDate, setCollectionDate] = useState<Dayjs | null>(defaultValue)
+  const [paymentMethod, setPaymentMethod] = useState('Cash')
+  const [paymentOptions, setPaymentOptions] = useState<{ value: string; label: string }[]>([])
+  const [paymentRefNo, setPaymentRefNo] = useState('')
+  const [remarks, setRemarks] = useState('')
+  const [feeSubmitting, setFeeSubmitting] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+
+  const [assignedFees, setAssignedFees] = useState<any[]>([]);
+  const [loadingFees, setLoadingFees] = useState(false);
+
+  useEffect(() => {
+    const fetchFeesStatus = async () => {
+      if (!student?.id || !academicYearId) return;
+      try {
+        setLoadingFees(true);
+        const res = await apiService.getStudentFeeDetailedStatus(student.id, academicYearId);
+        if (res.status === "SUCCESS") {
+          setAssignedFees(res.data);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoadingFees(false);
+      }
+    };
+
+    const fetchPaymentModes = async () => {
+      try {
+        const res = await apiService.getPaymentModes();
+        if (res?.status === 'SUCCESS' && Array.isArray(res.data)) {
+          const options = res.data.map(m => ({ value: m.name, label: m.name }));
+          setPaymentOptions(options);
+          if (options.length > 0 && !paymentMethod) {
+            setPaymentMethod(options[0].value);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch payment modes', err);
+      }
+    };
+    fetchPaymentModes();
+
+    if (student?.id && academicYearId) fetchFeesStatus();
+  }, [student?.id, academicYearId]);
+
+  const totalCompulsoryBalance = assignedFees
+    .filter(f => !f.is_optional && parseFloat(f.pending_amount) > 0)
+    .reduce((sum, f) => sum + (parseFloat(f.pending_amount) || 0), 0);
+
+  const totalBalance = assignedFees
+    .filter(f => parseFloat(f.pending_amount) > 0)
+    .reduce((sum, f) => sum + (parseFloat(f.pending_amount) || 0), 0);
+
+  const feeStructureOptions = useMemo(() => {
+    return assignedFees
+      .filter(f => parseFloat(f.pending_amount) > 0)
+      .map((f) => ({
+        value: String(f.fees_assign_details_id),
+        label: `${f.fee_type} (Bal: ${parseFloat(f.pending_amount).toLocaleString()})`,
+        balance: parseFloat(f.pending_amount),
+        isOptional: !!f.is_optional,
+        group: f.fee_group,
+        type: f.fee_type
+      }));
+  }, [assignedFees]);
+
+  // Virtual options for internal state tracking when bulk buttons are clicked
+  const bulkOptions = [
+    { value: 'ALL_COMPULSORY', label: 'All Compulsory Fees' },
+    { value: 'ALL_TOTAL', label: 'Total Outstanding Balance' }
+  ];
+
+  // Login details (usernames) for parent & student
+  const [loginRows, setLoginRows] = useState<Array<{ userType: string; username: string | null; phone?: string | null; email?: string | null }>>([])
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [loginError, setLoginError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!student?.id) {
+      setLoginRows([])
+      setLoginError(null)
+      setLoginLoading(false)
+      return
+    }
+    let mounted = true
+    setLoginLoading(true)
+    setLoginError(null)
+    apiService
+      .getStudentLoginDetails(student.id)
+      .then((res: any) => {
+        if (!mounted) return
+        if (res?.status === 'SUCCESS' && res.data) {
+          const d = res.data
+          const rows: Array<{ userType: string; username: string | null; phone?: string | null; email?: string | null }> = []
+          if (Array.isArray(d.parents)) {
+            d.parents.forEach((p: any) => {
+              rows.push({
+                userType: p.userType || 'Parent',
+                username: p.username ?? null,
+                phone: p.phone ?? null,
+                email: p.email ?? null,
+              })
+            })
+          }
+          if (d.student) {
+            rows.push({
+              userType: d.student.userType || 'Student',
+              username: d.student.username ?? null,
+              phone: d.student.phone ?? null,
+              email: d.student.email ?? null,
+            })
+          }
+          setLoginRows(rows)
+        } else {
+          setLoginRows([])
+        }
+      })
+      .catch((err: any) => {
+        if (!mounted) return
+        setLoginError(err?.message || 'Failed to fetch login details')
+        setLoginRows([])
+      })
+      .finally(() => {
+        if (mounted) setLoginLoading(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [student?.id])
+
+  const maskedLoginRows = useMemo(
+    () =>
+      loginRows.map((row) => {
+        const maskValue = (val?: string | null) => {
+          const v = (val || '').toString().trim()
+          if (!v) return ''
+          if (/^\d{6,}$/.test(v)) {
+            // phone-like: show last 3 digits only
+            return `Phone ending ${v.slice(-3)}`
+          }
+          const atIdx = v.indexOf('@')
+          if (atIdx > 1) {
+            return `${v[0]}***${v.slice(atIdx)}`
+          }
+          return 'Configured by admin'
+        }
+        const hint = row.phone || row.email || null
+        return {
+          ...row,
+          passwordHint: hint ? maskValue(hint) : 'Use existing password',
+        }
+      }),
+    [loginRows]
+  )
+
+  useEffect(() => {
+    if (student && feeStructureOptions.length > 0 && !feeStructureId) {
+      const firstForStudent = effectiveFeeData?.[0] || null;
+      if (firstForStudent) {
+        setFeeStructureId(String(firstForStudent.fees_assign_details_id));
+        setAmountPaid(String(firstForStudent.pending_amount || 0));
+      }
+    }
+  }, [student, feeStructureOptions, effectiveFeeData])
+
+  const hideDeleteModal = () => {
+    const el = document.getElementById('delete-modal')
+    if (el) {
+      const bsModal = (window as any).bootstrap?.Modal?.getInstance(el)
+      if (bsModal) bsModal.hide()
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!student?.id) return
+    setIsDeleting(true)
+    try {
+      await apiService.deleteStudent(student.id)
+      hideDeleteModal()
+      Swal.fire({
+        title: 'Deleted!',
+        text: `${[student.first_name, student.last_name].filter(Boolean).join(' ') || 'Student'} has been deleted.`,
+        icon: 'success',
+        confirmButtonText: 'OK',
+      }).then(() => {
+        onStudentDeleted?.()
+      })
+    } catch (err: any) {
+      Swal.fire('Error', err?.message || 'Failed to delete student', 'error')
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
+  const hideAddFeesModal = () => {
+    const el = document.getElementById('add_fees_collect')
+    if (el) {
+      const bsModal = (window as any).bootstrap?.Modal?.getInstance(el)
+      if (bsModal) bsModal.hide()
+    }
+  }
+
+  const handleAddFeesSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!student?.id || !academicYearId) {
+      Swal.fire("Error", 'Please select a student and academic year.', "error");
+      return
+    }
+    if (!feeStructureId) {
+      Swal.fire("Error", 'Please select a Fee Type.', "error");
+      return
+    }
+    const amt = parseFloat(amountPaid)
+    if (Number.isNaN(amt) || amt <= 0) {
+      Swal.fire("Error", 'Please enter a valid amount.', "error");
+      return
+    }
+
+    let feeItemsToPay: { fees_assign_details_id: number; amount_to_pay: number }[] = [];
+    if (feeStructureId === 'ALL_COMPULSORY' || feeStructureId === 'ALL_TOTAL') {
+      const targetItems = assignedFees.filter(f => {
+        if (feeStructureId === 'ALL_COMPULSORY') return !f.is_optional && parseFloat(f.pending_amount) > 0;
+        return parseFloat(f.pending_amount) > 0;
+      });
+
+      // Distribute amount across items
+      let remainingToDistribute = amt;
+      for (const item of targetItems) {
+        if (remainingToDistribute <= 0) break;
+        const itemBal = parseFloat(item.pending_amount);
+        const payForThisItem = Math.min(itemBal, remainingToDistribute);
+        feeItemsToPay.push({
+          fees_assign_details_id: Number(item.fees_assign_details_id),
+          amount_to_pay: payForThisItem
+        });
+        remainingToDistribute -= payForThisItem;
+      }
+    } else {
+      const selectedFee = assignedFees.find(f => String(f.fees_assign_details_id) === feeStructureId);
+      if (selectedFee && amt > parseFloat(selectedFee.pending_amount)) {
+        Swal.fire("Error", `Amount exceeds balance (${selectedFee.pending_amount})`, "error");
+        return;
+      }
+      feeItemsToPay.push({
+        fees_assign_details_id: Number(feeStructureId),
+        amount_to_pay: amt
+      });
+    }
+
+    setFeeSubmitting(true)
+    try {
+      const res = await apiService.collectFeesEnterprise({
+        student_id: student.id,
+        academic_year_id: academicYearId,
+        payment_date: collectionDate ? collectionDate.format('YYYY-MM-DD') : new Date().toISOString().slice(0, 10),
+        payment_mode: paymentMethod || 'Cash',
+        remarks: remarks || '',
+        receipt_no: paymentRefNo.trim() || undefined,
+        fee_items: feeItemsToPay
+      })
+      if (res?.status === 'SUCCESS') {
+        Swal.fire("Success", "Fee collected successfully", "success");
+
+        // Generate PDF Receipt
+        try {
+          const schoolRes = await apiService.getSchoolProfile();
+          const schoolInfo = schoolRes?.data || {
+            name: "School Management System",
+            address: "N/A",
+            phone: "N/A",
+            email: "N/A"
+          };
+
+          const academicYears = (window as any).academicYears || [];
+          const currentYear = academicYears.find((y: any) => y.id === academicYearId)?.year_name || "N/A";
+
+          await generateFeeReceipt({
+            school: {
+              name: schoolInfo.school_name || schoolInfo.name || "School Management System",
+              address: schoolInfo.address || "N/A",
+              phone: schoolInfo.phone || schoolInfo.mobile || "N/A",
+              email: schoolInfo.email || "N/A",
+              logo_url: schoolInfo.logo_url
+            },
+            student: {
+              name: [student.first_name, student.last_name].filter(Boolean).join(' '),
+              admission_number: student.admission_number || "N/A",
+              roll_number: (student as any).roll_number,
+              class_name: student.class_name || "N/A",
+              section_name: student.section_name || "N/A"
+            },
+            academic_year: academicYears.find((y: any) => y.id === academicYearId)?.year_name || "N/A",
+            payment: {
+              receipt_no: res.data.receipt_no || paymentRefNo || "N/A",
+              date: collectionDate ? collectionDate.toISOString() : new Date().toISOString(),
+              payment_mode: paymentMethod,
+              remarks: remarks,
+              items: feeItemsToPay.map(item => {
+                const fs = assignedFees.find(f => Number(f.fees_assign_details_id) === item.fees_assign_details_id);
+                return {
+                  fee_type: fs?.fee_type || "Fee Payment",
+                  amount: item.amount_to_pay
+                };
+              }),
+              total_paid: res.data.amount_paid || amt,
+              fine_paid: res.data.fine_paid || 0,
+              new_balance: res.data.new_balance
+            }
+          });
+        } catch (pdfErr) {
+          console.error("Failed to generate PDF receipt", pdfErr);
+        }
+
+        onFeeCollected?.()
+        hideAddFeesModal()
+        setFeeStructureId('')
+        setAmountPaid('')
+        setCollectionDate(defaultValue)
+        setPaymentMethod('cash')
+        setPaymentRefNo('')
+        setRemarks('')
+      }
+    } catch (err: any) {
+      Swal.fire("Error", err.message || "Failed to collect fee", "error");
+    } finally {
+      setFeeSubmitting(false)
+    }
+  }
+
+  const hideApplyLeaveModal = () => {
+    setApplyError(null);
+    const el = document.getElementById('apply_leave');
+    if (el) {
+      const bsModal = (window as any).bootstrap?.Modal?.getInstance(el);
+      if (bsModal) bsModal.hide();
+    }
+  };
+
+  const handleApplyLeaveSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setApplyError(null)
+    if (!studentId) {
+      setApplyError('Please select a student to apply leave for.')
+      return
+    }
+    const typeId = applyLeaveType?.value
+    if (!typeId) {
+      setApplyError('Please select Leave Type.')
+      return
+    }
+    const isDocRequired = (applyLeaveType as any)?.requires_medical_certificate;
+    if (isDocRequired && !applyDocument) {
+      setApplyError('An attachment/document is required for this leave type.')
+      return
+    }
+    if (!applyFromDate || !applyToDate) {
+      setApplyError('Please select From Date and To Date.')
+      return
+    }
+    if (!applyReason.trim()) {
+      setApplyError('Please enter a reason.')
+      return
+    }
+    const fromStr = applyFromDate.format('YYYY-MM-DD')
+    const toStr = applyToDate.format('YYYY-MM-DD')
+    if (applyFromDate.startOf("day").isBefore(todayStart)) {
+      setApplyError('Leave From Date cannot be in the past.')
+      return
+    }
+    if (toStr < fromStr) {
+      setApplyError('To Date must be on or after From Date.')
+      return
+    }
+    setApplySubmitting(true)
+    try {
+      let document_url = null;
+      if (applyDocument) {
+        const uploadRes = await apiService.uploadSchoolStorageFile(applyDocument, 'documents');
+        if (uploadRes?.status === 'SUCCESS' && uploadRes?.data?.url) {
+          document_url = uploadRes.data.url;
+        } else {
+          setApplyError('Failed to upload document.');
+          setApplySubmitting(false);
+          return;
+        }
+      }
+
+      const res = await apiService.createLeaveApplication({
+        leave_type_id: Number(typeId),
+        student_id: studentId,
+        start_date: fromStr,
+        end_date: toStr,
+        reason: applyReason.trim(),
+        document_url,
+      })
+      if (res?.status === 'SUCCESS') {
+        onLeaveApplied?.()
+        hideApplyLeaveModal()
+        setApplyLeaveType(null)
+        setApplyFromDate(null)
+        setApplyToDate(null)
+        setApplyReason('')
+        setApplyDocument(null)
+        setApplyError(null)
+      } else {
+        setApplyError(res?.message || 'Failed to apply leave.')
+      }
+    } catch (err: any) {
+      let msg = err?.message || 'Failed to apply leave.'
+      try {
+        const m = msg.match(/\{[\s\S]*\}/)
+        if (m) {
+          const j = JSON.parse(m[0])
+          if (j.detail) msg = `${j.message || msg}\n\nDetail: ${j.detail}`
+        }
+      } catch (_) {
+        // ignore
+      }
+      if (msg.includes('HTTP error! status: 400, message: ')) {
+        msg = msg.replace('HTTP error! status: 400, message: ', '');
+      }
+      setApplyError(msg)
+    } finally {
+      setApplySubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      {/* Add Fees Collect */}
+      <div className="modal fade" id="add_fees_collect">
+        <div className="modal-dialog modal-dialog-centered modal-lg">
+          <div className="modal-content">
+            <div className="modal-header">
+              <div className="d-flex align-items-center">
+                <h4 className="modal-title">Collect Fees</h4>
+                {student?.admission_number && (
+                  <span className="badge badge-sm bg-primary ms-2">{student.admission_number}</span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn-close custom-btn-close"
+                data-bs-dismiss="modal"
+                aria-label="Close"
+              >
+                <i className="ti ti-x" />
+              </button>
+            </div>
+            <form onSubmit={handleAddFeesSubmit}>
+              <div id="modal-datepicker" className="modal-body">
+                {isTeacher ? (
+                  <div className="alert alert-soft-danger border-0 d-flex align-items-center mb-0">
+                    <i className="ti ti-alert-circle me-2 fs-18" />
+                    <span>You do not have permission to collect fees.</span>
+                  </div>
+                ) : student ? (
+                  <>
+                    <div className="bg-light-300 p-3 pb-0 rounded mb-4">
+                      <div className="row align-items-center">
+                        <div className="col-lg-3 col-md-6">
+                          <div className="d-flex align-items-center mb-3">
+                            <Link to={student?.id ? `${routes.studentDetail}/${student.id}` : routes.studentList} state={student ? { student } : undefined} className="avatar avatar-md me-2">
+                              <ImageWithBasePath src={student.photo_url || 'assets/img/students/student-01.jpg'} alt="img" />
+                            </Link>
+                            <Link to={student?.id ? `${routes.studentDetail}/${student.id}` : routes.studentList} state={student ? { student } : undefined} className="d-flex flex-column">
+                              <span className="text-dark">{[student.first_name, student.last_name].filter(Boolean).join(' ') || 'N/A'}</span>
+                              {student.class_name && student.section_name ? `${student.class_name}, ${student.section_name}` : student.class_name || student.section_name || '-'}
+                            </Link>
+                          </div>
+                        </div>
+                        <div className="col-lg-3 col-md-6">
+                          <div className="mb-3">
+                            <span className="fs-12 mb-1">Total Outstanding</span>
+                            <div className="d-flex align-items-center flex-wrap gap-1">
+                              <p className="text-dark fw-bold text-danger mb-0 me-2">
+                                {totalBalance.toLocaleString()}
+                              </p>
+                              {totalBalance > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn btn-soft-danger btn-xs py-0 px-1"
+                                  style={{ fontSize: '10px' }}
+                                  onClick={() => {
+                                    setFeeStructureId('ALL_TOTAL');
+                                    setAmountPaid(String(totalBalance));
+                                  }}
+                                >
+                                  Pay All
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-lg-3 col-md-6">
+                          <div className="mb-3">
+                            <span className="fs-12 mb-1">Compulsory Fees</span>
+                            <div className="d-flex align-items-center flex-wrap gap-1">
+                              <p className="text-dark fw-bold mb-0 me-2">
+                                {totalCompulsoryBalance.toLocaleString()}
+                              </p>
+                              {totalCompulsoryBalance > 0 && totalCompulsoryBalance !== totalBalance && (
+                                <button
+                                  type="button"
+                                  className="btn btn-soft-primary btn-xs py-0 px-1"
+                                  style={{ fontSize: '10px' }}
+                                  onClick={() => {
+                                    setFeeStructureId('ALL_COMPULSORY');
+                                    setAmountPaid(String(totalCompulsoryBalance));
+                                  }}
+                                >
+                                  Pay Compulsory
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-lg-3 col-md-6">
+                          <div className="mb-3">
+                            <span className={`badge badge-soft-${(effectiveFeeData || []).some(r => parseFloat(r?.pending_amount) > 0) ? 'danger' : 'success'}`}>
+                              <i className="ti ti-circle-filled me-2" />
+                              {(effectiveFeeData || []).some(r => parseFloat(r?.pending_amount) > 0) ? 'Unpaid/Partial' : 'Paid'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="row">
+                      <div className="col-lg-6">
+                        <div className="mb-3">
+                          <label className="form-label">Fees Type</label>
+                          <Select
+                            classNamePrefix="react-select"
+                            className="select"
+                            options={feeStructureOptions}
+                            value={feeStructureOptions.find((o) => o.value === feeStructureId) ?? bulkOptions.find((o) => o.value === feeStructureId) ?? null}
+                            onChange={(opt) => {
+                              const val = opt?.value ?? '';
+                              setFeeStructureId(val);
+
+                              if (val === 'ALL_COMPULSORY') {
+                                setAmountPaid(String(totalCompulsoryBalance));
+                              } else if (val === 'ALL_TOTAL') {
+                                setAmountPaid(String(totalBalance));
+                              } else {
+                                const fs = assignedFees.find((f) => String(f.fees_assign_details_id) === val);
+                                if (fs && fs.pending_amount != null) {
+                                  setAmountPaid(String(fs.pending_amount));
+                                }
+                              }
+                            }}
+                            formatOptionLabel={(data: any) => (
+                              <div className="d-flex justify-content-between align-items-center w-100">
+                                <span>{data.label}</span>
+                                {data.isOptional ? (
+                                  <span className="badge badge-soft-warning ms-2" style={{ fontSize: '10px' }}>Optional</span>
+                                ) : (
+                                  <span className="badge bg-info text-white ms-2" style={{ fontSize: '10px' }}>Compulsory</span>
+                                )}
+                              </div>
+                            )}
+                            placeholder="Select Fee Type"
+                            isClearable
+                          />
+                        </div>
+                      </div>
+                      <div className="col-lg-6">
+                        <div className="mb-3">
+                          <label className="form-label">Amount</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            className="form-control"
+                            placeholder="Enter Amount"
+                            value={amountPaid}
+                            onChange={(e) => setAmountPaid(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div className="col-lg-6">
+                        <div className="mb-3">
+                          <label className="form-label">Collection Date</label>
+                          <div className="date-pic">
+                            <DatePicker
+                              className="form-control datetimepicker"
+                              format="DD-MM-YYYY"
+                              getPopupContainer={getModalContainer}
+                              value={collectionDate}
+                              onChange={(d) => setCollectionDate(d)}
+                              placeholder="Select date"
+                            />
+                            <span className="cal-icon"><i className="ti ti-calendar" /></span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="col-lg-6">
+                        <div className="mb-3">
+                          <label className="form-label">Payment Type</label>
+                          <Select
+                            classNamePrefix="react-select"
+                            className="select"
+                            options={paymentOptions}
+                            value={paymentOptions.find((o) => o.value === paymentMethod) ?? paymentOptions[0]}
+                            onChange={(opt) => setPaymentMethod(opt?.value ?? 'Cash')}
+                            placeholder="Select Payment Type"
+                          />
+                        </div>
+                      </div>
+                      <div className="col-lg-12">
+                        <div className="mb-3">
+                          <label className="form-label">Payment Reference No</label>
+                          <input
+                            type="text"
+                            className="form-control"
+                            placeholder="Enter Payment Reference No (optional)"
+                            value={paymentRefNo}
+                            onChange={(e) => setPaymentRefNo(e.target.value)}
+                          />
+                        </div>
+                        <div className="col-lg-12">
+                          <div className="mb-0">
+                            <label className="form-label">Remarks</label>
+                            <textarea
+                              rows={2}
+                              className="form-control"
+                              placeholder="Add remarks (optional)"
+                              value={remarks}
+                              onChange={(e) => setRemarks(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-4 text-muted">
+                    <p>Please open a student&apos;s detail page and click &quot;Add Fees&quot;, or go to Fees Collection to collect fees for a student.</p>
+                  </div>
+                )}
+              </div>
+              {student && !isTeacher && (
+                <div className="modal-footer">
+                  <button type="button" className="btn btn-light me-2" data-bs-dismiss="modal">Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={feeSubmitting || !feeStructureId || !amountPaid}>
+                    {feeSubmitting ? 'Processing...' : 'Pay Fees'}
+                  </button>
+                </div>
+              )}
+            </form>
+          </div>
+        </div>
+      </div>
+      {/* Add Fees Collect */}
+      {/* Delete Modal */}
+      <div className="modal fade" id="delete-modal">
+        <div className="modal-dialog modal-dialog-centered">
+          <div className="modal-content">
+            <form>
+              <div className="modal-body text-center">
+                <span className="delete-icon">
+                  <i className="ti ti-trash-x" />
+                </span>
+                {isTeacher ? (
+                  <h4>Permission Denied</h4>
+                ) : (
+                  <h4>Confirm Deletion</h4>
+                )}
+                <p>
+                  {isTeacher
+                    ? "You do not have permission to delete student records."
+                    : "You want to delete all the marked items, this cant be undone once you delete."
+                  }
+                </p>
+                <div className="d-flex justify-content-center">
+                  <Link
+                    to="#"
+                    className="btn btn-light me-3"
+                    data-bs-dismiss="modal"
+                  >
+                    {isTeacher ? "Close" : "Cancel"}
+                  </Link>
+                  {!isTeacher && (
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={handleDelete}
+                      disabled={isDeleting || !student?.id}
+                    >
+                      {isDeleting ? 'Deleting...' : 'Yes, Delete'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+      {/* /Delete Modal */}
+
+      <>
+        {/* Login Details */}
+        <div className="modal fade" id="login_detail">
+          <div className="modal-dialog modal-dialog-centered  modal-lg">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h4 className="modal-title">Login Details</h4>
+                <button
+                  type="button"
+                  className="btn-close custom-btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                >
+                  <i className="ti ti-x" />
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="student-detail-info">
+                  <span className="student-img">
+                    <ImageWithBasePath src={student?.photo_url || 'assets/img/students/student-01.jpg'} alt="Img" />
+                  </span>
+                  <div className="name-info">
+                    <h6>
+                      {[student?.first_name, student?.last_name].filter(Boolean).join(' ') || 'Student'}
+                      {(student?.class_name || student?.section_name) && (
+                        <span>
+                          {' '}
+                          {(student?.class_name && student?.section_name)
+                            ? `${student.class_name}, ${student.section_name}`
+                            : (student?.class_name || student?.section_name)}
+                        </span>
+                      )}
+                    </h6>
+                  </div>
+                </div>
+                <div className="table-responsive custom-table no-datatable_length">
+                  <table className="table datanew">
+                    <thead className="thead-light">
+                      <tr>
+                        <th>User Type</th>
+                        <th>User Name</th>
+                        <th>Password</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {loginLoading && (
+                        <tr>
+                          <td colSpan={3}>Loading login details...</td>
+                        </tr>
+                      )}
+                      {!loginLoading && loginError && (
+                        <tr>
+                          <td colSpan={3}>{loginError}</td>
+                        </tr>
+                      )}
+                      {!loginLoading && !loginError && maskedLoginRows.length === 0 && (
+                        <tr>
+                          <td colSpan={3}>No login accounts found for this student.</td>
+                        </tr>
+                      )}
+                      {!loginLoading &&
+                        !loginError &&
+                        maskedLoginRows.map((row, idx) => (
+                          <tr key={`${row.userType}-${row.username || idx}`}>
+                            <td>{row.userType}</td>
+                            <td>{row.username || 'N/A'}</td>
+                            <td>{row.passwordHint}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <Link to="#" className="btn btn-light me-2" data-bs-dismiss="modal">
+                  Cancel
+                </Link>
+              </div>
+            </div>
+          </div>
+        </div>
+        {/* /Login Details */}
+      </>
+      <>
+        {/* Apply Leave */}
+        <div className="modal fade" id="apply_leave">
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h4 className="modal-title">Apply Leave</h4>
+                <button
+                  type="button"
+                  className="btn-close custom-btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                >
+                  <i className="ti ti-x" />
+                </button>
+              </div>
+              <form onSubmit={handleApplyLeaveSubmit}>
+                <div id="modal-datepicker" className="modal-body">
+                  <div className="row">
+                    <div className="col-md-12">
+                      {applyError && (
+                        <div className="alert alert-danger alert-dismissible fade show d-flex align-items-center mb-3" role="alert" style={{ gap: '8px' }}>
+                          <i className="ti ti-alert-circle" style={{ fontSize: '18px' }} />
+                          <div style={{ flex: 1, fontSize: '13px', lineHeight: '1.4' }}>{applyError}</div>
+                          <button type="button" className="btn-close ms-auto" style={{ position: 'relative', top: 'auto', right: 'auto', padding: '0.5rem' }} onClick={() => setApplyError(null)} aria-label="Close" />
+                        </div>
+                      )}
+                      <div className="mb-3">
+                        <label className="form-label">Leave Type</label>
+                        <Select
+                          classNamePrefix="react-select"
+                          className="select"
+                          options={leaveTypeOptions}
+                          value={applyLeaveType}
+                          onChange={setApplyLeaveType}
+                          placeholder="Select Leave Type"
+                        />
+                      </div>
+                      <div className="mb-3">
+                        <label className="form-label">Leave From Date</label>
+                        <div className="date-pic">
+                          <DatePicker
+                            className="form-control datetimepicker"
+                            format="DD-MM-YYYY"
+                            getPopupContainer={getModalContainer}
+                            value={applyFromDate}
+                            onChange={(d) => setApplyFromDate(d)}
+                            placeholder="Select date"
+                            disabledDate={(current) => !!current && current.startOf("day").isBefore(todayStart)}
+                          />
+                          <span className="cal-icon"><i className="ti ti-calendar" /></span>
+                        </div>
+                      </div>
+                      <div className="mb-3">
+                        <label className="form-label">Leave To Date</label>
+                        <div className="date-pic">
+                          <DatePicker
+                            className="form-control datetimepicker"
+                            format="DD-MM-YYYY"
+                            getPopupContainer={getModalContainer}
+                            value={applyToDate}
+                            onChange={(d) => setApplyToDate(d)}
+                            placeholder="Select date"
+                            disabledDate={(current) => {
+                              if (!current) return false
+                              const inPast = current.startOf("day").isBefore(todayStart)
+                              const beforeFrom = applyFromDate ? current.startOf("day").isBefore(applyFromDate.startOf("day")) : false
+                              return inPast || beforeFrom
+                            }}
+                          />
+                          <span className="cal-icon"><i className="ti ti-calendar" /></span>
+                        </div>
+                      </div>
+                      <div className="mb-0">
+                        <label className="form-label">Reason</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          placeholder="Enter reason"
+                          value={applyReason}
+                          onChange={(e) => setApplyReason(e.target.value)}
+                        />
+                      </div>
+                      <div className="mb-0 mt-3">
+                        <label className="form-label">
+                          Attachment { (applyLeaveType as any)?.requires_medical_certificate ? <span className="text-danger">(Required) *</span> : '(Optional)' }
+                        </label>
+                        <input
+                           type="file"
+                           className="form-control"
+                           onChange={(e) => {
+                             if (e.target.files && e.target.files.length > 0) {
+                               setApplyDocument(e.target.files[0])
+                             } else {
+                               setApplyDocument(null)
+                             }
+                           }}
+                         />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn btn-light me-2" data-bs-dismiss="modal">Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={applySubmitting || !studentId}>
+                    {applySubmitting ? 'Submitting...' : 'Apply Leave'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        {/* /Apply Leave */}
+      </>
+
+    </>
+
+  )
+}
+
+export default StudentModals

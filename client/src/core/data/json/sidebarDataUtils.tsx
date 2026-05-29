@@ -1,0 +1,662 @@
+import { all_routes } from "../../../feature-module/router/all_routes";
+import { SidebarData } from "./sidebarData";
+import { isAdministrativeRole, isHeadmasterRole } from "../../utils/roleUtils";
+
+const routes = all_routes;
+
+/**
+ * Role-specific dashboard labels and links for non-admin users
+ */
+const ROLE_DASHBOARD_MAP: Record<string, { label: string; link: string }> = {
+  Admin: { label: "Headmaster Dashboard", link: routes.adminDashboard },
+  Administrative: { label: "Administrative Dashboard", link: routes.administrativeDashboard },
+  Teacher: { label: "Teacher Dashboard", link: routes.teacherDashboard },
+  Student: { label: "Student Dashboard", link: routes.studentDashboard },
+  Parent: { label: "Parent Dashboard", link: routes.parentDashboard },
+  Guardian: { label: "Guardian Dashboard", link: routes.guardianDashboard },
+  Driver: { label: "Driver Dashboard", link: routes.driverDashboard },
+};
+
+const ADMINISTRATIVE_VISIBLE_SECTIONS = new Set([
+  "MAIN",
+  "Settings",
+  "People",
+  "Academic",
+  "MANAGEMENT",
+  "HRM",
+  "Finance & Accounts",
+  "Announcements",
+  "Reports",
+  "Pages",
+  "Help & Support",
+]);
+
+function buildTeacherSidebar() {
+  return [
+    {
+      label: "MAIN",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Main",
+      submenuItems: [
+        {
+          label: "Teacher Dashboard",
+          icon: "ti ti-layout-dashboard",
+          link: routes.teacherDashboard,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "My Leave & Attendance",
+          icon: "ti ti-calendar-due",
+          link: routes.teacherLeaves,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Application",
+          icon: "ti ti-layout-list",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Chat", link: routes.chat, showSubRoute: false },
+            { label: "Call", link: routes.callHistory, showSubRoute: false },
+            { label: "Calendar", link: routes.calendar, showSubRoute: false },
+            { label: "Email", link: routes.email, showSubRoute: false },
+            { label: "To Do", link: routes.todo, showSubRoute: false },
+            { label: "Notes", link: routes.notes, showSubRoute: false },
+            { label: "File Manager", link: routes.fileManager, showSubRoute: false },
+          ],
+        },
+      ],
+    },
+    {
+      label: "Academic",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Academic",
+      submenuItems: [
+        {
+          label: "Timetable",
+          icon: "ti ti-table-options",
+          link: routes.teachersRoutine,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Home Work",
+          icon: "ti ti-license",
+          link: routes.classHomeWork,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Attendance",
+          icon: "ti ti-calendar-check",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Student Attendance", link: routes.studentAttendance },
+            { label: "Attendance Report", link: routes.studentAttendanceReport },
+          ],
+        },
+        {
+          label: "Examinations",
+          icon: "ti ti-clipboard-list",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Exams", link: routes.exam },
+            { label: "Exam Timetable", link: routes.examAttendance },
+            { label: "Exam Result", link: routes.examResult },
+            { label: "Top Performers", link: routes.examTopPerformers },
+          ],
+        },
+        {
+          label: "Enquiries",
+          link: routes.enquiries,
+          icon: "ti ti-message-dots",
+          showSubRoute: false,
+          submenu: false,
+        },
+      ],
+    },
+    {
+      label: "People",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "People",
+      submenuItems: [
+        {
+          label: "Students",
+          icon: "ti ti-school",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "All Students", link: routes.studentGrid },
+            { label: "Students List", link: routes.studentList },
+            { label: "Students Details", link: routes.studentList },
+            { label: "Student Leaves", link: routes.approveRequest },
+            { label: "Bonafide", link: routes.bonafideGenerator },
+          ],
+        },
+        {
+          label: "Parents",
+          icon: "ti ti-user-bolt",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "All Parents", link: routes.parentGrid },
+            { label: "Parents List", link: routes.parentList },
+          ],
+        },
+        {
+          label: "Guardians",
+          icon: "ti ti-user-shield",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "All Guardians", link: routes.guardiansGrid },
+            { label: "Guardians List", link: routes.guardiansList },
+          ],
+        },
+      ],
+    },
+    {
+      label: "Announcements",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Announcements",
+      submenuItems: [
+        {
+          label: "Events",
+          link: routes.events,
+          icon: "ti ti-speakerphone",
+          showSubRoute: false,
+          submenu: false,
+        },
+        {
+          label: "Notice Board",
+          link: routes.noticeBoard,
+          icon: "ti ti-note",
+          showSubRoute: false,
+          submenu: false,
+        },
+      ],
+    },
+
+    {
+      label: "Reports",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Reports",
+      submenuItems: [
+        {
+          label: "Student Attendance Report",
+          link: routes.studentAttendanceReport,
+          icon: "ti ti-chart-dots-3",
+          showSubRoute: false,
+          submenu: false,
+        },
+      ],
+    },
+    {
+      label: "Pages",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Pages",
+      submenuItems: [
+        {
+          label: "Profile",
+          icon: "ti ti-user-circle",
+          link: routes.profile,
+          submenu: false,
+          showSubRoute: false,
+        },
+      ],
+    },
+  ];
+}
+
+function buildStudentSidebar() {
+  return [
+    {
+      label: "MAIN",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Main",
+      submenuItems: [
+        {
+          label: "Student Dashboard",
+          icon: "ti ti-layout-dashboard",
+          link: routes.studentDashboard,
+          submenu: false,
+          showSubRoute: false,
+        },
+      ],
+    },
+    {
+      label: "Academic",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Academic",
+      submenuItems: [
+        {
+          label: "My Profile",
+          icon: "ti ti-user-circle",
+          link: routes.studentDetail,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Subjects",
+          icon: "ti ti-book",
+          link: routes.studentSubjects,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Time Table",
+          icon: "ti ti-table",
+          link: routes.studentTimeTable,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Homework",
+          icon: "ti ti-notebook",
+          link: routes.studentHomework,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Leave & Attendance",
+          icon: "ti ti-calendar-share",
+          link: routes.studentLeaves,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Fees",
+          icon: "ti ti-report-money",
+          link: routes.studentFees,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Examinations",
+          icon: "ti ti-clipboard-list",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Exam Timetable", link: routes.examAttendance, showSubRoute: false },
+            { label: "Exam Result", link: routes.examResult, showSubRoute: false },
+          ],
+        },
+      ],
+    },
+    {
+      label: "Announcements",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Announcements",
+      submenuItems: [
+        {
+          label: "Notice Board",
+          link: routes.noticeBoard,
+          icon: "ti ti-note",
+          showSubRoute: false,
+          submenu: false,
+        },
+        {
+          label: "Events",
+          link: routes.events,
+          icon: "ti ti-speakerphone",
+          showSubRoute: false,
+          submenu: false,
+        },
+      ],
+    },
+    {
+      label: "Pages",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Pages",
+      submenuItems: [
+        {
+          label: "Profile",
+          icon: "ti ti-user",
+          link: routes.profile,
+          submenu: false,
+          showSubRoute: false,
+        },
+      ],
+    },
+  ];
+}
+
+function buildParentSidebar() {
+  return [
+    {
+      label: "MAIN",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Main",
+      submenuItems: [
+        {
+          label: "Parent Dashboard",
+          icon: "ti ti-layout-dashboard",
+          link: routes.parentDashboard,
+          submenu: false,
+          showSubRoute: false,
+        },
+      ],
+    },
+    {
+      label: "Academic",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Academic",
+      submenuItems: [
+        {
+          label: "Child Profile",
+          icon: "ti ti-user-circle",
+          link: routes.studentDetail,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Subjects",
+          icon: "ti ti-book",
+          link: routes.studentSubjects,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Time Table",
+          icon: "ti ti-table",
+          link: routes.studentTimeTable,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Homework",
+          icon: "ti ti-notebook",
+          link: routes.parentHomework,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Leave & Attendance",
+          icon: "ti ti-calendar-share",
+          link: routes.studentLeaves,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Fees",
+          icon: "ti ti-report-money",
+          link: routes.studentFees,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Examinations",
+          icon: "ti ti-clipboard-list",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Exam Timetable", link: routes.examAttendance, showSubRoute: false },
+            { label: "Exam Result", link: routes.examResult, showSubRoute: false },
+          ],
+        },
+      ],
+    },
+    {
+      label: "Announcements",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Announcements",
+      submenuItems: [
+        {
+          label: "Notice Board",
+          link: routes.noticeBoard,
+          icon: "ti ti-note",
+          showSubRoute: false,
+          submenu: false,
+        },
+        {
+          label: "Events",
+          link: routes.events,
+          icon: "ti ti-speakerphone",
+          showSubRoute: false,
+          submenu: false,
+        },
+      ],
+    },
+    {
+      label: "Pages",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Pages",
+      submenuItems: [
+        {
+          label: "Profile",
+          icon: "ti ti-user",
+          link: routes.profile,
+          submenu: false,
+          showSubRoute: false,
+        },
+      ],
+    },
+  ];
+}
+
+function buildGuardianSidebar(): typeof SidebarData {
+  const parentLike = buildParentSidebar() as typeof SidebarData;
+  return parentLike.map((section) => {
+    if (section.label !== "MAIN") return section;
+    return {
+      ...section,
+      submenuItems: (section.submenuItems || []).map((item: { label?: string; link?: string }) =>
+        item.label === "Parent Dashboard"
+          ? { ...item, label: "Guardian Dashboard", link: routes.guardianDashboard }
+          : item
+      ),
+    };
+  }) as typeof SidebarData;
+}
+
+function buildAdministrativeSidebar(): typeof SidebarData {
+  return SidebarData
+    .filter((section) => ADMINISTRATIVE_VISIBLE_SECTIONS.has(section.label))
+    .map((section: any) => {
+      const nextSection: any = {
+        ...section,
+        submenuItems: [...(section.submenuItems || [])],
+      };
+
+      if (section.label === "MAIN") {
+        nextSection.submenuItems = nextSection.submenuItems.map((item: any) => {
+          if (item.label !== "Dashboard") return item;
+          return {
+            ...item,
+            label: "Administrative Dashboard",
+            link: routes.administrativeDashboard,
+          };
+        });
+        const hasMyLeaves = nextSection.submenuItems.some((item: any) => item.label === "My Leave & Attendance");
+        if (!hasMyLeaves) {
+          nextSection.submenuItems.push({
+            label: "My Leave & Attendance",
+            icon: "ti ti-calendar-due",
+            link: routes.administrativeLeaves,
+            submenu: false,
+            showSubRoute: false,
+          });
+        }
+      }
+
+      if (section.label === "HRM") {
+        // Administrative staff apply/view own leave via MAIN → My Leave & Attendance only.
+        nextSection.submenuItems = nextSection.submenuItems.filter(
+          (item: any) => item.label !== "Leaves"
+        );
+      }
+
+      if (section.label === "Pages") {
+        nextSection.submenuItems = nextSection.submenuItems.filter((item: any) => item.label === "Profile");
+      }
+
+      if (section.label === "Academic") {
+        const hasExaminations = (nextSection.submenuItems || []).some(
+          (item: any) => item.label === "Examinations"
+        );
+        if (!hasExaminations) {
+          nextSection.submenuItems = [
+            ...(nextSection.submenuItems || []),
+            {
+              label: "Examinations",
+              icon: "ti ti-clipboard-list",
+              submenu: true,
+              showSubRoute: false,
+              submenuItems: [
+                { label: "Exams", link: routes.exam },
+                { label: "Schedule", link: routes.examAttendance },
+                { label: "Exam Result", link: routes.examResult },
+                { label: "Top Performers", link: routes.examTopPerformers },
+              ],
+            },
+          ];
+        }
+      }
+
+      if (section.label === "Academic") {
+        const hasEnquiries = (nextSection.submenuItems || []).some((item: any) => item.label === "Enquiries");
+        if (!hasEnquiries) {
+          nextSection.submenuItems = [
+            ...(nextSection.submenuItems || []),
+            {
+              label: "Enquiries",
+              link: routes.enquiries,
+              icon: "ti ti-message-dots",
+              showSubRoute: false,
+              submenu: false,
+            },
+          ];
+        }
+      }
+
+      return nextSection;
+    }) as typeof SidebarData;
+}
+
+/**
+ * Get sidebar data filtered by user role.
+ * Admin sees full sidebar; other roles see only their dashboard + Application.
+ */
+export function getSidebarDataForRole(role: string | undefined | null): typeof SidebarData {
+  const normalizedRole = (role || "Admin").trim();
+  const roleLower = normalizedRole.toLowerCase();
+  const roleKey = normalizedRole.charAt(0).toUpperCase() + normalizedRole.slice(1).toLowerCase();
+
+  const headmasterLike =
+    isHeadmasterRole(role) || roleLower.includes("headmaster") || roleLower.includes("administrator");
+  const administrativeLike = isAdministrativeRole(role) || roleLower.includes("administrative");
+
+  if (headmasterLike) {
+    return SidebarData;
+  }
+
+  if (administrativeLike) {
+    return buildAdministrativeSidebar();
+  }
+
+  if (roleKey === "Teacher") {
+    return buildTeacherSidebar();
+  }
+
+  if (roleKey === "Student") {
+    return buildStudentSidebar();
+  }
+
+  if (roleKey === "Parent") {
+    return buildParentSidebar();
+  }
+
+  if (roleKey === "Guardian") {
+    return buildGuardianSidebar();
+  }
+
+  if (roleKey === "Driver") {
+    return [
+      {
+        label: "MAIN",
+        submenuOpen: true,
+        showSubRoute: false,
+        submenuHdr: "Main",
+        submenuItems: [
+          {
+            label: "Driver Dashboard",
+            icon: "ti ti-layout-dashboard",
+            link: routes.driverDashboard,
+            submenu: false,
+            showSubRoute: false,
+          },
+        ],
+      },
+      {
+        label: "Pages",
+        submenuOpen: true,
+        showSubRoute: false,
+        submenuHdr: "Pages",
+        submenuItems: [
+          {
+            label: "Profile",
+            icon: "ti ti-user-circle",
+            link: routes.profile,
+            submenu: false,
+            showSubRoute: false,
+          },
+        ],
+      },
+    ];
+  }
+
+  const dashboardItem = ROLE_DASHBOARD_MAP[roleKey] || ROLE_DASHBOARD_MAP.Admin;
+
+  // For non-admin: only MAIN section with single Dashboard link + Application
+  return [
+    {
+      label: "MAIN",
+      submenuOpen: true,
+      showSubRoute: false,
+      submenuHdr: "Main",
+      submenuItems: [
+        {
+          label: dashboardItem.label,
+          icon: "ti ti-layout-dashboard",
+          link: dashboardItem.link,
+          submenu: false,
+          showSubRoute: false,
+        },
+        {
+          label: "Application",
+          icon: "ti ti-layout-list",
+          submenu: true,
+          showSubRoute: false,
+          submenuItems: [
+            { label: "Chat", link: routes.chat, showSubRoute: false },
+            { label: "Call", link: routes.callHistory, showSubRoute: false },
+            { label: "Calendar", link: routes.calendar, showSubRoute: false },
+            { label: "Email", link: routes.email, showSubRoute: false },
+            { label: "To Do", link: routes.todo, showSubRoute: false },
+            { label: "Notes", link: routes.notes, showSubRoute: false },
+            { label: "File Manager", link: routes.fileManager, showSubRoute: false },
+          ],
+        },
+      ],
+    },
+  ];
+}
+

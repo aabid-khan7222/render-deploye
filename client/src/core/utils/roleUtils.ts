@@ -1,0 +1,370 @@
+/**
+ * Role-based routing utilities
+ * Maps user_roles.role_name from DB to dashboard routes
+ */
+
+import { all_routes } from '../../feature-module/router/all_routes';
+
+type RoleInput =
+  | string
+  | undefined
+  | null
+  | {
+      role?: string;
+      role_id?: number;
+      user_role_id?: number;
+    };
+
+export type UserRole = 'Admin' | 'Administrative' | 'Teacher' | 'Student' | 'Parent' | 'Guardian' | 'Driver';
+
+const HEADMASTER_ROLE_NAMES = new Set(['admin', 'headmaster', 'administrator']);
+const ADMINISTRATIVE_ROLE_NAMES = new Set(['administrative']);
+const HEADMASTER_ROLE_IDS = new Set([1]);
+const ADMINISTRATIVE_ROLE_IDS = new Set([6]);
+
+const ADMINISTRATIVE_ALLOWED_PATH_PREFIXES = [
+  '/administrative/',
+  '/academic-settings/',
+  '/student/',
+  '/teacher/',
+  '/parent/',
+  '/academic/',
+  '/management/',
+  '/hrm/',
+  '/accounts/',
+  '/announcements/',
+  '/report/',
+  '/application/',
+  '/support/',
+  '/help-support/',
+];
+
+const ADMINISTRATIVE_ALLOWED_EXACT_PATHS = new Set([
+  all_routes.administrativeDashboard,
+  all_routes.schoolSettings,
+  all_routes.religion,
+  all_routes.bonafideGenerator,
+  all_routes.chat,
+  all_routes.callHistory,
+  all_routes.calendar,
+  all_routes.email,
+  all_routes.todo,
+  all_routes.notes,
+  all_routes.fileManager,
+  all_routes.profile,
+  all_routes.helpSupport,
+]);
+
+const ADMINISTRATIVE_BLOCKED_EXACT_PATHS = new Set<string>();
+
+type RoleScope = 'headmaster' | 'administrative' | 'teacher' | 'student' | 'parent' | 'guardian' | 'driver' | 'unknown';
+
+function getRoleParts(role: RoleInput, explicitRoleId?: number | null): { roleName: string; roleId: number | null } {
+  if (role && typeof role === 'object') {
+    const rawId = role.user_role_id ?? role.role_id;
+    const roleId = Number(rawId);
+    const safeId = Number.isFinite(roleId) && roleId > 0 ? roleId : null;
+    const o = role as { role_name?: string; role?: string };
+    const fromDb = o.role_name != null && String(o.role_name).trim() !== '' ? String(o.role_name) : '';
+    const fromCanonical = o.role != null && String(o.role).trim() !== '' ? String(o.role) : '';
+    /** Prefer DB `role_name` from /auth/me over UI `role` — normalized `role` can be "User" if name/id were briefly out of sync. */
+    const roleNameSource = fromDb || fromCanonical;
+    return {
+      roleName: roleNameSource.trim().toLowerCase(),
+      roleId: safeId,
+    };
+  }
+
+  const fallbackRoleId = Number(explicitRoleId);
+  return {
+    roleName: String(role || '').trim().toLowerCase(),
+    roleId: Number.isFinite(fallbackRoleId) ? fallbackRoleId : null,
+  };
+}
+
+function getRoleScope(role: RoleInput, explicitRoleId?: number | null): RoleScope {
+  const { roleName, roleId } = getRoleParts(role, explicitRoleId);
+
+  if ((roleId != null && ADMINISTRATIVE_ROLE_IDS.has(roleId)) || ADMINISTRATIVE_ROLE_NAMES.has(roleName)) {
+    return 'administrative';
+  }
+
+  if ((roleId != null && HEADMASTER_ROLE_IDS.has(roleId)) || HEADMASTER_ROLE_NAMES.has(roleName)) {
+    return 'headmaster';
+  }
+
+  // When user_roles.role_name is missing or out of sync, role_id still matches server ROLES (see server/src/config/roles.js).
+  if (roleId === 2 || roleName === 'teacher' || roleName.includes('teacher')) {
+    return 'teacher';
+  }
+  if (roleId === 3 || roleName === 'student') {
+    return 'student';
+  }
+  if (roleId === 5 || roleName === 'guardian') {
+    return 'guardian';
+  }
+  if (roleId === 4 || roleName === 'parent' || roleName === 'father' || roleName === 'mother' || roleName.includes('parent')) {
+    return 'parent';
+  }
+
+  switch (roleName) {
+    case 'teacher':
+      return 'teacher';
+    case 'student':
+      return 'student';
+    case 'parent':
+      return 'parent';
+    case 'guardian':
+      return 'guardian';
+    case 'driver':
+      return 'driver';
+    default:
+      return 'unknown';
+  }
+}
+
+export function isHeadmasterRole(role: RoleInput, explicitRoleId?: number | null): boolean {
+  return getRoleScope(role, explicitRoleId) === 'headmaster';
+}
+
+export function isAdministrativeRole(role: RoleInput, explicitRoleId?: number | null): boolean {
+  return getRoleScope(role, explicitRoleId) === 'administrative';
+}
+
+export function isTeacherRole(role: RoleInput, explicitRoleId?: number | null): boolean {
+  return getRoleScope(role, explicitRoleId) === 'teacher';
+}
+
+/** Matches server EVENT_MANAGER_ROLES: Headmaster, Administrative. */
+export function canManageSchoolEvents(role: RoleInput, explicitRoleId?: number | null): boolean {
+  const scope = getRoleScope(role, explicitRoleId);
+  return scope === 'headmaster' || scope === 'administrative';
+}
+
+export function getDisplayRoleLabel(role: RoleInput, explicitRoleId?: number | null): string {
+  switch (getRoleScope(role, explicitRoleId)) {
+    case 'headmaster':
+      return 'Headmaster';
+    case 'administrative':
+      return 'Administrative';
+    case 'teacher':
+      return 'Teacher';
+    case 'student':
+      return 'Student';
+    case 'parent':
+      return 'Parent';
+    case 'guardian':
+      return 'Guardian';
+    case 'driver':
+      return 'Driver';
+    default: {
+      const { roleName } = getRoleParts(role, explicitRoleId);
+      return roleName ? roleName.charAt(0).toUpperCase() + roleName.slice(1) : 'User';
+    }
+  }
+}
+
+/**
+ * Canonical auth role used by routing/guards.
+ * IMPORTANT: this is based on role_id/role_name only, not designation/display_role.
+ */
+export function normalizeAuthRole(role: RoleInput, explicitRoleId?: number | null): UserRole | 'Admin' | 'User' {
+  const scope = getRoleScope(role, explicitRoleId);
+  switch (scope) {
+    case 'headmaster':
+      return 'Admin';
+    case 'administrative':
+      return 'Administrative';
+    case 'teacher':
+      return 'Teacher';
+    case 'student':
+      return 'Student';
+    case 'parent':
+      return 'Parent';
+    case 'guardian':
+      return 'Guardian';
+    case 'driver':
+      return 'Driver';
+    default:
+      return 'User';
+  }
+}
+
+/**
+ * Get dashboard route for a given role
+ * role_name / role_id comes from auth payload
+ */
+export function getDashboardForRole(role: RoleInput, explicitRoleId?: number | null): string {
+  const scope = getRoleScope(role, explicitRoleId);
+  if (!role) return all_routes.adminDashboard;
+  switch (scope) {
+    case 'headmaster':
+      return all_routes.adminDashboard;
+    case 'administrative':
+      return all_routes.administrativeDashboard;
+    case 'teacher':
+      return all_routes.teacherDashboard;
+    case 'student':
+      return all_routes.studentDashboard;
+    case 'parent':
+      return all_routes.parentDashboard;
+    case 'guardian':
+      return all_routes.guardianDashboard;
+    case 'driver':
+      return all_routes.driverDashboard;
+    default:
+      return all_routes.adminDashboard;
+  }
+}
+
+/**
+ * Get browser tab title for the given role (for document.title).
+ * Used in main layout so tab shows role-specific title instead of generic "Preskool Admin Template".
+ */
+export function getPageTitleForRole(role: string | undefined | null): string {
+  if (!role || typeof role !== 'string') return 'Preskool';
+  switch (getRoleScope(role)) {
+    case 'headmaster':
+      return 'Preskool Headmaster';
+    case 'administrative':
+      return 'Preskool Administrative';
+    case 'teacher':
+      return "Preskool Teacher";
+    case 'student':
+      return "Preskool Student";
+    case 'parent':
+      return "Preskool's Child Parent";
+    case 'guardian':
+      return "Preskool's Child Guardian";
+    case 'driver':
+      return "Preskool Driver";
+    default:
+      if (String(role).trim().toLowerCase().includes('teacher')) return "Preskool Teacher";
+      return 'Preskool';
+  }
+}
+
+/**
+ * Get browser tab title for the logged-in school + role.
+ * Example outputs:
+ * - "Millat's Student"
+ * - "Iqra's Teacher"
+ * - "Anglo's Headmaster"
+ */
+export function getTabTitleForSchoolRole(
+  schoolName: string | undefined | null,
+  role: string | undefined | null
+): string {
+  const safeSchool = (schoolName ?? '').trim();
+  const roleLabel = getDisplayRoleLabel(role);
+
+  if (!safeSchool) return `Preskool ${roleLabel}`.trim();
+  return `${safeSchool}'s ${roleLabel}`;
+}
+
+/**
+ * Path prefixes restricted to Admin only (backend USER_MANAGER_ROLES).
+ * Add more prefixes as needed to align with backend RBAC.
+ */
+const ADMIN_ONLY_PATH_PREFIXES = [
+  '/user-management/',
+  '/general-settings/',
+  '/website-settings/',
+  '/system-settings/',
+  '/financial-settings/',
+  '/other-settings/',
+  '/content/',
+];
+
+/**
+ * Check if user with given role can access the given path.
+ * Used for frontend route protection to match backend RBAC.
+ */
+export function canAccessPath(path: string, role: RoleInput, explicitRoleId?: number | null): boolean {
+  if (path === all_routes.approveRequest) {
+    const scope = getRoleScope(role, explicitRoleId);
+    return scope === 'teacher' || scope === 'headmaster';
+  }
+  if (path === all_routes.listLeaves) {
+    return (
+      isHeadmasterRole(role, explicitRoleId) ||
+      getRoleScope(role, explicitRoleId) === 'teacher'
+    );
+  }
+  if (path === all_routes.leaveTypesManage) {
+    return isHeadmasterRole(role, explicitRoleId);
+  }
+
+  const userDashboard = getDashboardForRole(role, explicitRoleId);
+  const dashboardPaths = [
+    all_routes.adminDashboard,
+    all_routes.administrativeDashboard,
+    all_routes.teacherDashboard,
+    all_routes.studentDashboard,
+    all_routes.parentDashboard,
+    all_routes.guardianDashboard,
+    all_routes.driverDashboard,
+  ];
+  if (dashboardPaths.includes(path)) {
+    return path === userDashboard;
+  }
+
+  /** Help & Support: Headmaster + Administrative only (matches server SUPPORT_ACCESS_ROLES). */
+  if (path === all_routes.helpSupport || path.startsWith('/help-support/')) {
+    return isHeadmasterRole(role, explicitRoleId) || isAdministrativeRole(role, explicitRoleId);
+  }
+
+  /** Personal Todo — staff only (not student/parent). */
+  if (path === all_routes.todo) {
+    const scope = getRoleScope(role, explicitRoleId);
+    return scope !== 'student' && scope !== 'parent';
+  }
+
+  /** Academic Years module: Headmaster + Administrative only (not teachers/students/parents). */
+  const academicYearsBase = all_routes.academicYears;
+  if (
+    academicYearsBase &&
+    (path === academicYearsBase || path.startsWith(`${academicYearsBase}/`))
+  ) {
+    return isHeadmasterRole(role, explicitRoleId) || isAdministrativeRole(role, explicitRoleId);
+  }
+
+  /** Master data settings (houses, blood groups, mother tongues, casts). */
+  if (path.startsWith("/settings/")) {
+    return isHeadmasterRole(role, explicitRoleId) || isAdministrativeRole(role, explicitRoleId);
+  }
+
+  if (isHeadmasterRole(role, explicitRoleId)) {
+    return true;
+  }
+
+  if (isAdministrativeRole(role, explicitRoleId)) {
+    if (ADMINISTRATIVE_BLOCKED_EXACT_PATHS.has(path)) return false;
+    if (ADMIN_ONLY_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
+    if (ADMINISTRATIVE_ALLOWED_EXACT_PATHS.has(path)) return true;
+    return ADMINISTRATIVE_ALLOWED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+  }
+
+  if (getRoleScope(role, explicitRoleId) === 'teacher') {
+    const teacherBlockedPaths = new Set<string>([
+      all_routes.staffDayWise,
+      all_routes.staffReport,
+      all_routes.staffAttendance,
+    ]);
+    if (teacherBlockedPaths.has(path)) return false;
+  }
+
+  if (getRoleScope(role, explicitRoleId) === 'driver') {
+    const allowed = new Set<string>([
+      all_routes.driverDashboard,
+      all_routes.profile,
+      all_routes.activity,
+    ]);
+    return allowed.has(path);
+  }
+
+  if (ADMIN_ONLY_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) {
+    return false;
+  }
+  return true;
+}

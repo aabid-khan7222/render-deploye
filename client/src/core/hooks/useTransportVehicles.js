@@ -1,0 +1,92 @@
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { apiService } from '../services/apiService';
+
+const defaultImg = 'assets/img/parents/parent-01.jpg';
+const formatDate = (value) => {
+  if (!value) return 'N/A';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'N/A';
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+export const useTransportVehicles = (initialParams = {}) => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [metadata, setMetadata] = useState({
+    totalCount: 0,
+    page: 1,
+    limit: 10,
+    totalPages: 0
+  });
+
+  const [params, setParams] = useState({
+    page: 1,
+    limit: 10,
+    search: '',
+    status: 'all',
+    ...initialParams
+  });
+  const paramsKey = useMemo(() => JSON.stringify(params), [params]);
+
+  const fetchVehicles = useCallback(async (overrides = {}) => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const combinedParams = { ...params, ...overrides };
+      const response = await apiService.getTransportVehicles(combinedParams);
+      
+      if (response && response.status === "SUCCESS") {
+        const list = response.data || [];
+        const mapped = await Promise.all(list.map(async (row, index) => ({
+          key: String(row.id || index + 1),
+          id: row.id,
+          displayId: row.vehicle_code,
+          vehicleNo: row.vehicle_number || 'N/A',
+          vehicleModel: row.vehicle_model || row.model || '-',
+          img: (row.photo_url ? await apiService.resolveAvatarUrl(row.photo_url) : '') || defaultImg,
+          madeofYear: row.made_of_year || 'N/A',
+          chassisNo: row.chassis_number || 'N/A',
+          gps: row.gps_device_id || 'N/A',
+          seatCapacity: row.seat_capacity ?? row.seating_capacity ?? '-',
+          insuranceExpiry: formatDate(row.insurance_expiry),
+          fitnessExpiry: formatDate(row.fitness_expiry),
+          permitExpiry: formatDate(row.permit_expiry),
+          name: row.driver_name || 'N/A',
+          phone: row.driver_phone || 'N/A',
+          status: row.is_active ? 'Active' : 'Inactive',
+          statusClass: row.is_active ? 'badge badge-soft-success' : 'badge badge-soft-danger',
+          originalData: row,
+        })));
+        
+        setData(mapped);
+        if (response.metadata) {
+          setMetadata(response.metadata);
+        }
+      } else {
+        setData([]);
+      }
+    } catch (err) {
+      console.error('Error fetching transport vehicles:', err);
+      setError(err?.message || 'Failed to fetch vehicles');
+      setData([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [paramsKey, params]);
+
+  useEffect(() => {
+    fetchVehicles();
+  }, [fetchVehicles]);
+
+  return {
+    data,
+    loading,
+    error,
+    metadata,
+    params,
+    setParams,
+    refetch: fetchVehicles,
+  };
+};

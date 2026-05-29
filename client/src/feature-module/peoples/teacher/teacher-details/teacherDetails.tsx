@@ -1,0 +1,625 @@
+
+import TeacherModal from '../teacherModal';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useSelector } from 'react-redux';
+import { all_routes } from '../../../router/all_routes';
+import TeacherSidebar from './teacherSidebar';
+import TeacherBreadcrumb from './teacherBreadcrumb';
+import { apiService } from '../../../../core/services/apiService';
+import { selectSelectedAcademicYearId } from '../../../../core/data/redux/academicYearSlice';
+
+interface TeacherDetailsLocationState {
+  teacherId?: number;
+  teacher?: any;
+}
+
+const TeacherDetails = () => {
+  const routes = all_routes;
+  const navigate = useNavigate();
+  const location = useLocation();
+  const state = location.state as TeacherDetailsLocationState | null;
+  const teacherId = state?.teacherId ?? state?.teacher?.id;
+  const academicYearId = useSelector(selectSelectedAcademicYearId);
+  const [teacher, setTeacher] = useState<any>(state?.teacher ?? null);
+  const [loading, setLoading] = useState(!!teacherId);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Redirect to Teacher List if no teacherId is provided (e.g., clicked from sidebar)
+  // MUST be before any early returns to follow Rules of Hooks
+  useEffect(() => {
+    if (!teacherId && !loading) {
+      navigate(routes.teacherList, { replace: true });
+    }
+  }, [teacherId, loading, navigate, routes.teacherList]);
+
+  // Always fetch full teacher by ID when teacherId is available to ensure we have complete data
+  // This works whether coming from grid (partial teacher) or list (full teacher)
+  useEffect(() => {
+    if (teacherId) {
+      setLoading(true);
+      setLoadError(null);
+      apiService
+        .getTeacherById(teacherId, academicYearId ? { academicYearId } : {})
+        .then((res: any) => {
+          if (res?.data) {
+            setTeacher(res.data);
+            return;
+          }
+          setTeacher(null);
+        })
+        .catch((err: unknown) => {
+          setTeacher(null);
+          setLoadError((err as Error)?.message || 'Unable to load teacher details.');
+        })
+        .finally(() => setLoading(false));
+    }
+  }, [teacherId, academicYearId]);
+
+  if (loading) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="d-flex justify-content-center align-items-center p-5">
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+            <span className="ms-2">Loading teacher...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!teacher && !teacherId) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="d-flex justify-content-center align-items-center p-5">
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+            <span className="ms-2">Redirecting to Teacher List...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!teacher) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="alert alert-danger m-3" role="alert">
+            <i className="ti ti-alert-circle me-2" />
+            {loadError || 'Teacher details are not available.'}
+          </div>
+          <button type="button" className="btn btn-outline-primary ms-3" onClick={() => navigate(-1)}>
+            <i className="ti ti-arrow-left me-1" />
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const formattedDob = teacher.date_of_birth
+    ? new Date(teacher.date_of_birth).toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      })
+    : 'N/A';
+
+  const experienceText =
+    typeof teacher.experience_years === 'number'
+      ? `${teacher.experience_years} Years`
+      : 'N/A';
+
+  const classTeacherOf = Array.isArray(teacher.class_teacher_of) ? teacher.class_teacher_of : [];
+  const sectionTeacherOf = Array.isArray(teacher.section_teacher_of) ? teacher.section_teacher_of : [];
+
+  const combinedClassTeachers = [
+    ...classTeacherOf.map((item: any) => ({
+      ...item,
+      displayName: (item.className || 'N/A') + (item.classCode ? ` (${item.classCode})` : ''),
+    })),
+    ...sectionTeacherOf.map((item: any) => ({
+      ...item,
+      displayName:
+        (item.className || 'N/A') +
+        (item.classCode ? ` (${item.classCode})` : '') +
+        ' - ' +
+        (item.sectionName || 'N/A'),
+    })),
+  ];
+
+  const teacherStoredDocBasename = (storedPath?: string | null) => {
+    if (!storedPath) return null;
+    const seg = String(storedPath).split('/').pop() || '';
+    return seg || null;
+  };
+
+  const downloadTeacherPdf = async (docType: 'resume' | 'joining_letter') => {
+    if (!teacher?.id) return;
+    try {
+      const blob = await apiService.fetchTeacherDocumentBlob(teacher.id, docType);
+      const objectUrl = URL.createObjectURL(blob);
+      const filename =
+        docType === 'resume'
+          ? teacherStoredDocBasename(teacher.resume) || 'resume.pdf'
+          : teacherStoredDocBasename(teacher.joining_letter) || 'joining-letter.pdf';
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = filename;
+      a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (err: unknown) {
+      const message = (err as Error)?.message || 'Unable to download document.';
+      setLoadError(message);
+    }
+  };
+
+  return (
+    <>
+  {/* Page Wrapper */}
+  <div className="page-wrapper">
+    <div className="content">
+      {loadError && (
+        <div className="alert alert-danger mb-3" role="alert">
+          <i className="ti ti-alert-circle me-2" />
+          {loadError}
+        </div>
+      )}
+      <div className="row">
+        {/* Page Header */}
+        <TeacherBreadcrumb teacherId={teacher.id} teacher={teacher} />
+        {/* /Page Header */}
+        {/* Teacher Information */}
+        <TeacherSidebar teacher={teacher} />
+        {/* /Student Information */}
+        <div className="col-xxl-9 col-xl-8">
+          <div className="row">
+            <div className="col-md-12">
+              {/* List */}
+              <ul className="nav nav-tabs nav-tabs-bottom mb-4">
+                <li>
+                  <Link to={routes.teacherDetails} className="nav-link active">
+                    <i className="ti ti-school me-2" />
+                    Teacher Details
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to={routes.teachersRoutine}
+                    className="nav-link"
+                    state={{ teacherId: teacher.id, teacher }}
+                  >
+                    <i className="ti ti-table-options me-2" />
+                    Routine
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to={routes.teacherLeaves}
+                    className="nav-link"
+                    state={{ teacherId: teacher.id, teacher }}
+                  >
+                    <i className="ti ti-calendar-due me-2" />
+                    Leave &amp; Attendance
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to={routes.teacherSalary}
+                    className="nav-link"
+                    state={{ teacherId: teacher.id, teacher }}
+                  >
+                    <i className="ti ti-report-money me-2" />
+                    Salary
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to={routes.teacherLibrary}
+                    className="nav-link"
+                    state={{ teacherId: teacher.id, teacher }}
+                  >
+                    <i className="ti ti-bookmark-edit me-2" />
+                    Library
+                  </Link>
+                </li>
+              </ul>
+              {/* /List */}
+              {/* Parents Information */}
+              <div className="card">
+                <div className="card-header">
+                  <h5>Profile Details</h5>
+                </div>
+                <div className="card-body">
+                  <div className="border rounded p-3 pb-0">
+                    <div className="row">
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">
+                            Father’s Name
+                          </p>
+                          <p>{teacher.father_name || 'N/A'}</p>
+                        </div>
+                      </div>
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">
+                            Mother Name
+                          </p>
+                          <p>{teacher.mother_name || 'N/A'}</p>
+                        </div>
+                      </div>
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">DOB</p>
+                          <p>{formattedDob}</p>
+                        </div>
+                      </div>
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">
+                            Martial Status
+                          </p>
+                          <p>{teacher.marital_status || 'N/A'}</p>
+                        </div>
+                      </div>
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">
+                            Qualification
+                          </p>
+                          <p>{teacher.qualification || 'N/A'}</p>
+                        </div>
+                      </div>
+                      <div className="col-sm-6 col-lg-4">
+                        <div className="mb-3">
+                          <p className="text-dark fw-medium mb-1">Experience</p>
+                          <p>{experienceText}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {/* /Parents Information */}
+
+              <div className="card">
+                <div className="card-header">
+                  <h5>Class Teacher Mapping</h5>
+                </div>
+                <div className="card-body">
+                  <h6 className="mb-3">
+                    Class Teacher Of
+                    <span className="badge bg-primary ms-2">{combinedClassTeachers.length}</span>
+                  </h6>
+                  {combinedClassTeachers.length > 0 ? (
+                    <div className="border rounded p-3">
+                      <div className="d-flex flex-wrap gap-2">
+                        {combinedClassTeachers.map((item: any, idx: number) => (
+                          <span
+                            key={idx}
+                            className="badge bg-light text-dark border fw-medium px-3 py-2"
+                          >
+                            {item.displayName}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="alert alert-light border mb-0">
+                      No class teacher assignment found.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="card-header">
+                  <h5>Subject Assignments</h5>
+                </div>
+                <div className="card-body">
+                  {Array.isArray(teacher.subject_assignments) && teacher.subject_assignments.length > 0 ? (
+                    <div className="border rounded p-3">
+                      <div className="row g-3">
+                        {teacher.subject_assignments.map((item: any) => (
+                          <div key={item.id} className="col-12 col-md-6 col-xl-4">
+                            <div className="bg-light-300 border rounded p-2">
+                              <div className="d-flex justify-content-between align-items-center mb-1">
+                                <p className="text-dark fw-medium mb-0">{item.subjectName}</p>
+                                {item.subject_type && (
+                                  <span className={`badge ${item.subject_type === 'Practical' ? 'bg-info' : 'bg-warning-light text-warning'}`}>
+                                    {item.subject_type}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="small text-muted mb-0">
+                                {item.class_name || item.className} {(item.section_name || item.sectionName) ? ` - ${(item.section_name || item.sectionName)}` : ''}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="alert alert-light border mb-0">No subject teacher assignments found.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+            {/* Documents */}
+            <div className="col-xxl-6 d-flex">
+              <div className="card flex-fill">
+                <div className="card-header">
+                  <h5>Documents</h5>
+                </div>
+                <div className="card-body">
+                  <div className="bg-light-300 border rounded d-flex align-items-center justify-content-between mb-3 p-2">
+                    <div className="d-flex align-items-center overflow-hidden">
+                      <span className="avatar avatar-md bg-white rounded flex-shrink-0 text-default">
+                        <i className="ti ti-pdf fs-15" />
+                      </span>
+                      <div className="ms-2">
+                        <p className="text-truncate fw-medium text-dark">
+                          Resume.pdf
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-dark btn-icon btn-sm"
+                      disabled={!teacher.resume}
+                      onClick={() => downloadTeacherPdf('resume')}
+                      title={teacher.resume ? 'Download resume' : 'Resume not uploaded'}
+                    >
+                      <i className="ti ti-download" />
+                    </button>
+                  </div>
+                  <div className="bg-light-300 border rounded d-flex align-items-center justify-content-between p-2">
+                    <div className="d-flex align-items-center overflow-hidden">
+                      <span className="avatar avatar-md bg-white rounded flex-shrink-0 text-default">
+                        <i className="ti ti-pdf fs-15" />
+                      </span>
+                      <div className="ms-2">
+                        <p className="text-truncate fw-medium text-dark">
+                          Joining Letter.pdf
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-dark btn-icon btn-sm"
+                      disabled={!teacher.joining_letter}
+                      onClick={() => downloadTeacherPdf('joining_letter')}
+                      title={teacher.joining_letter ? 'Download joining letter' : 'Joining letter not uploaded'}
+                    >
+                      <i className="ti ti-download" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Documents */}
+            {/* Address */}
+            <div className="col-xxl-6 d-flex">
+              <div className="card flex-fill">
+                <div className="card-header">
+                  <h5>Address</h5>
+                </div>
+                <div className="card-body">
+                  <div className="d-flex align-items-center mb-3">
+                    <span className="avatar avatar-md bg-light-300 rounded me-2 flex-shrink-0 text-default">
+                      <i className="ti ti-map-pin-up" />
+                    </span>
+                    <div>
+                      <p className="text-dark fw-medium mb-1">
+                        Current Address
+                      </p>
+                      <p>{teacher.current_address || 'N/A'}</p>
+                    </div>
+                  </div>
+                  <div className="d-flex align-items-center">
+                    <span className="avatar avatar-md bg-light-300 rounded me-2 flex-shrink-0 text-default">
+                      <i className="ti ti-map-pins" />
+                    </span>
+                    <div>
+                      <p className="text-dark fw-medium mb-1">
+                        Permanent Address
+                      </p>
+                      <p>{teacher.permanent_address || 'N/A'}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Address */}
+            {/* Previous School Details */}
+            <div className="col-xxl-12">
+              <div className="card">
+                <div className="card-header">
+                  <h5>Previous School Details</h5>
+                </div>
+                <div className="card-body pb-1">
+                  <div className="row">
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">
+                          Previous School Name
+                        </p>
+                        <p>{teacher.previous_school_name || 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">
+                          School Address
+                        </p>
+                        <p>{teacher.previous_school_address || 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Phone Number</p>
+                        <p>{teacher.previous_school_phone || 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Previous School Details */}
+            {/* Bank Details */}
+            <div className="col-xxl-6 d-flex">
+              <div className="card flex-fill">
+                <div className="card-header">
+                  <h5>Bank Details</h5>
+                </div>
+                <div className="card-body pb-1">
+                  <div className="row">
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Bank Name</p>
+                        <p>{teacher.bank_name ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Branch</p>
+                        <p>{teacher.branch ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Account Name</p>
+                        <p>{teacher.account_name ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Account Number</p>
+                        <p>{teacher.account_number ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">IFSC</p>
+                        <p>{teacher.ifsc ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Bank Details */}
+            {/* Work Details */}
+            <div className="col-xxl-6 d-flex">
+              <div className="card flex-fill">
+                <div className="card-header">
+                  <h5>Work Details</h5>
+                </div>
+                <div className="card-body pb-1">
+                  <div className="row">
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">
+                          Contract Type
+                        </p>
+                        <p>{teacher.contract_type ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Shift</p>
+                        <p>{teacher.shift ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">
+                          Work Location
+                        </p>
+                        <p>{teacher.work_location ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Work Details */}
+            {/* Social Media */}
+            <div className="col-xxl-12 d-flex">
+              <div className="card flex-fill">
+                <div className="card-header">
+                  <h5>Social Media</h5>
+                </div>
+                <div className="card-body pb-1">
+                  <div className="row row-cols-xxl-5 row-cols-xl-3">
+                    <div className="col">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Facebook</p>
+                        <p>{teacher.facebook ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Twitter</p>
+                        <p>{teacher.twitter ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Linkedin</p>
+                        <p>{teacher.linkedin ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Youtube</p>
+                        <p>{teacher.youtube ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                    <div className="col">
+                      <div className="mb-3">
+                        <p className="mb-1 text-dark fw-medium">Instagram</p>
+                        <p>{teacher.instagram ?? 'N/A'}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* /Social Media */}
+            {/* Other Info */}
+            <div className="col-xxl-12">
+              <div className="card">
+                <div className="card-header">
+                  <h5>Other Info</h5>
+                </div>
+                <div className="card-body">
+                  <p>{teacher.other_info || 'N/A'}</p>
+                </div>
+              </div>
+            </div>
+            {/* /Other Info */}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {/* /Page Wrapper */}
+  <TeacherModal staffId={teacher?.id} />
+</>
+
+  )
+}
+
+export default TeacherDetails

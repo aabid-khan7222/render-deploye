@@ -1,0 +1,827 @@
+const multer = require('multer');
+const { query, executeTransaction } = require('../config/database');
+const { parsePagination } = require('../utils/pagination');
+const { getParentsForUser } = require('../utils/parentUserMatch');
+const { getAuthContext, isAdmin, parseId, canAccessStudent } = require('../utils/accessControl');
+const { getSchoolIdFromRequest } = require('../utils/schoolContext');
+const { getStorageProvider } = require('../storage');
+const { success, error: errorResponse } = require('../utils/responseHelper');
+const { ROLES } = require('../config/roles');
+const {
+  normalizeTenantProfilePath,
+  createOrReuseParentUser,
+  assignFatherGuardian,
+  parseFullName,
+} = require('../services/parentFlowService');
+const {
+  syncStudentGuardians,
+  loadStudentLinkedUserIds,
+  resolveLinkedUser,
+  guardiansIsSlimSchema,
+  STUDENT_CONTACT_LATERAL_SELECT,
+  STUDENT_CONTACT_LATERAL_JOINS,
+} = require('../utils/studentContactSync');
+const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
+
+function isBlankValue(value) {
+  return value == null || (typeof value === 'string' && value.trim() === '');
+}
+
+function pickPreferredValue(currentValue, fallbackValue) {
+  return isBlankValue(currentValue) ? (fallbackValue ?? currentValue) : currentValue;
+}
+
+async function loadLatestLegacyParentContacts(studentIds) {
+  const ids = Array.from(new Set((studentIds || []).map((id) => parseId(id)).filter(Boolean)));
+  if (!ids.length) return new Map();
+
+  try {
+    const result = await query(
+      `SELECT DISTINCT ON (p.student_id)
+         p.student_id,
+         p.father_name,
+         p.father_email,
+         p.father_phone,
+         p.father_occupation,
+         p.father_image_url,
+         p.mother_name,
+         p.mother_email,
+         p.mother_phone,
+         p.mother_occupation,
+         p.mother_image_url
+       FROM parents p
+       WHERE p.student_id = ANY($1::int[])
+       ORDER BY p.student_id, COALESCE(p.updated_at, p.created_at) DESC, p.id DESC`,
+      [ids]
+    );
+
+    return new Map(result.rows.map((row) => [parseId(row.student_id), row]));
+  } catch (err) {
+    // parents table may not exist in fully unified deployments.
+    if (String(err?.code || '') === '42P01') return new Map();
+    throw err;
+  }
+}
+
+function mergeLegacyParentContact(row, legacyRow) {
+  if (!legacyRow) return row;
+  return {
+    ...row,
+    father_name: pickPreferredValue(row.father_name, legacyRow.father_name),
+    father_email: pickPreferredValue(row.father_email, legacyRow.father_email),
+    father_phone: pickPreferredValue(row.father_phone, legacyRow.father_phone),
+    father_occupation: pickPreferredValue(row.father_occupation, legacyRow.father_occupation),
+    father_image_url: pickPreferredValue(row.father_image_url, legacyRow.father_image_url),
+    mother_name: pickPreferredValue(row.mother_name, legacyRow.mother_name),
+    mother_email: pickPreferredValue(row.mother_email, legacyRow.mother_email),
+    mother_phone: pickPreferredValue(row.mother_phone, legacyRow.mother_phone),
+    mother_occupation: pickPreferredValue(row.mother_occupation, legacyRow.mother_occupation),
+    mother_image_url: pickPreferredValue(row.mother_image_url, legacyRow.mother_image_url),
+  };
+}
+
+async function enrichRowsWithLegacyParentContacts(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const legacyByStudent = await loadLatestLegacyParentContacts(rows.map((row) => row.student_id));
+  if (!legacyByStudent.size) return rows;
+  return rows.map((row) => mergeLegacyParentContact(row, legacyByStudent.get(parseId(row.student_id))));
+}
+
+async function fetchParentRowByStudentId(studentId, client = null) {
+  const q = client ? client.query.bind(client) : query;
+  const sql = `
+    SELECT
+      s.id,
+      s.id AS student_id,
+      ${STUDENT_CONTACT_LATERAL_SELECT},
+      s.created_at,
+      s.updated_at AS updated_at,
+      u.first_name AS student_first_name,
+      u.last_name AS student_last_name,
+      NULLIF(TRIM(u.avatar), '') AS student_image_url,
+      s.admission_number,
+      s.roll_number,
+      c.class_name,
+      sec.section_name
+    FROM students s
+    LEFT JOIN users u ON s.user_id = u.id
+    ${lateralCurrentEnrollment('s.id')}
+    LEFT JOIN classes c ON enr.class_id = c.id
+    LEFT JOIN sections sec ON enr.section_id = sec.id
+    ${STUDENT_CONTACT_LATERAL_JOINS}
+    WHERE s.id = $1 AND s.status = \'Active\'
+    LIMIT 1`;
+  const r = await q(sql, [studentId]);
+  const baseRow = r.rows[0] || null;
+  if (!baseRow) return null;
+  const enrichedRows = await enrichRowsWithLegacyParentContacts([baseRow]);
+  return enrichedRows[0] || baseRow;
+}
+
+const createParent = async (req, res) => {
+  try {
+    const {
+      student_id, father_name, father_email, father_phone, father_occupation, father_image_url,
+      mother_name, mother_email, mother_phone, mother_occupation, mother_image_url,
+    } = req.body;
+
+    if (!student_id) {
+      return res.status(400).json({
+        status: 'ERROR',
+        message: 'Student ID is required',
+      });
+    }
+
+    const parentRow = await executeTransaction(async (client) => {
+      const slim = await guardiansIsSlimSchema(client);
+      if (!slim) {
+        const err = new Error('Database not migrated: run npm run db:migrate:unify');
+        err.statusCode = 503;
+        throw err;
+      }
+      const chk = await client.query('SELECT id FROM students WHERE id = $1 AND status = \'Active\' LIMIT 1', [student_id]);
+      if (chk.rows.length === 0) {
+        const err = new Error('Student not found');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const warnings = [];
+      await syncStudentGuardians(
+        client,
+        student_id,
+        {
+          effFatherName: father_name,
+          effFatherEmail: father_email,
+          effFatherPhone: father_phone,
+          effFatherOcc: father_occupation,
+          effMotherName: mother_name,
+          effMotherEmail: mother_email,
+          effMotherPhone: mother_phone,
+          effMotherOcc: mother_occupation,
+          effGFirst: null,
+          effGLast: null,
+          effGPhone: null,
+          effGEmail: null,
+          effGOcc: null,
+          effGAddr: null,
+          effGRel: null,
+          fatherUserId: null,
+          motherUserId: null,
+          guardianUserId: null,
+        },
+        warnings
+      );
+
+      const linked = await loadStudentLinkedUserIds(client.query.bind(client), student_id);
+      if (father_image_url && linked.father_person_id) {
+        await client.query(`UPDATE users SET avatar = COALESCE(NULLIF(TRIM($1::text), ''), avatar) WHERE id = $2`, [
+          father_image_url,
+          linked.father_person_id,
+        ]);
+      }
+      if (mother_image_url && linked.mother_person_id) {
+        await client.query(`UPDATE users SET avatar = COALESCE(NULLIF(TRIM($1::text), ''), avatar) WHERE id = $2`, [
+          mother_image_url,
+          linked.mother_person_id,
+        ]);
+      }
+
+      return fetchParentRowByStudentId(student_id, client);
+    });
+
+    res.status(201).json({
+      status: 'SUCCESS',
+      message: 'Parent contacts saved successfully',
+      data: parentRow,
+    });
+  } catch (error) {
+    console.error('Error creating parent:', error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ status: 'ERROR', message: error.message });
+    }
+    if (error.statusCode === 503) {
+      return res.status(503).json({ status: 'ERROR', message: error.message });
+    }
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to create parent',
+    });
+  }
+};
+
+const updateParent = async (req, res) => {
+  try {
+    const studentId = parseId(req.params.id);
+    if (!studentId) {
+      return res.status(400).json({ status: 'ERROR', message: 'Invalid student ID' });
+    }
+
+    const {
+      father_name, father_email, father_phone, father_occupation, father_image_url,
+      mother_name, mother_email, mother_phone, mother_occupation, mother_image_url,
+      father_person_id, mother_person_id, guardian_person_id,
+    } = req.body;
+
+    const row = await executeTransaction(async (client) => {
+      const slim = await guardiansIsSlimSchema(client);
+      if (!slim) {
+        const err = new Error('Database not migrated: run npm run db:migrate:unify');
+        err.statusCode = 503;
+        throw err;
+      }
+      const chk = await client.query('SELECT id FROM students s WHERE s.id = $1 AND s.status = \'Active\' LIMIT 1', [studentId]);
+      if (chk.rows.length === 0) {
+        const err = new Error('Student not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const linked = await loadStudentLinkedUserIds(client.query.bind(client), studentId);
+      const hasFather = father_name || father_email || father_phone || father_occupation;
+      const hasMother = mother_name || mother_email || mother_phone || mother_occupation;
+
+      let fatherUserId = hasFather ? linked.father_person_id : null;
+      let motherUserId = hasMother ? linked.mother_person_id : null;
+      let guardianUserId = linked.guardian_person_id;
+
+      if (father_person_id) {
+        const u = await resolveLinkedUser(client, father_person_id, [ROLES.PARENT]);
+        fatherUserId = u.id;
+      }
+      if (mother_person_id) {
+        const u = await resolveLinkedUser(client, mother_person_id, [ROLES.PARENT]);
+        motherUserId = u.id;
+      }
+      if (guardian_person_id) {
+        const u = await resolveLinkedUser(client, guardian_person_id, [ROLES.GUARDIAN]);
+        guardianUserId = u.id;
+      }
+
+      const warnings = [];
+      await syncStudentGuardians(
+        client,
+        studentId,
+        {
+          effFatherName: father_name,
+          effFatherEmail: father_email,
+          effFatherPhone: father_phone,
+          effFatherOcc: father_occupation,
+          effMotherName: mother_name,
+          effMotherEmail: mother_email,
+          effMotherPhone: mother_phone,
+          effMotherOcc: mother_occupation,
+          effGFirst: null,
+          effGLast: null,
+          effGPhone: null,
+          effGEmail: null,
+          effGOcc: null,
+          effGAddr: null,
+          effGRel: null,
+          fatherUserId,
+          motherUserId,
+          guardianUserId,
+        },
+        warnings
+      );
+
+      // Update Father's user record if exists
+      if (fatherUserId) {
+        const { first_name: fFirst, last_name: fLast } = parseFullName(father_name || "");
+        await client.query(
+          `UPDATE users SET 
+            first_name = $1, last_name = $2, email = $3, phone = $4, occupation = $5, updated_at = NOW()
+           WHERE id = $6`,
+          [fFirst || null, fLast || null, father_email || null, father_phone || null, father_occupation || null, fatherUserId]
+        );
+      }
+
+      // Update Mother's user record if exists
+      if (motherUserId) {
+        const { first_name: mFirst, last_name: mLast } = parseFullName(mother_name || "");
+        await client.query(
+          `UPDATE users SET 
+            first_name = $1, last_name = $2, email = $3, phone = $4, occupation = $5, updated_at = NOW()
+           WHERE id = $6`,
+          [mFirst || null, mLast || null, mother_email || null, mother_phone || null, mother_occupation || null, motherUserId]
+        );
+      }
+
+      // Handle avatar updates (allow clearing)
+      if (fatherUserId && father_image_url !== undefined) {
+        await client.query(`UPDATE users SET avatar = $1, updated_at = NOW() WHERE id = $2`, [
+          father_image_url || "",
+          fatherUserId,
+        ]);
+      }
+      if (motherUserId && mother_image_url !== undefined) {
+        await client.query(`UPDATE users SET avatar = $1, updated_at = NOW() WHERE id = $2`, [
+          mother_image_url || "",
+          motherUserId,
+        ]);
+      }
+
+      return fetchParentRowByStudentId(studentId, client);
+    });
+
+    res.status(200).json({
+      status: 'SUCCESS',
+      message: 'Parent updated successfully',
+      data: row,
+    });
+  } catch (error) {
+    if (error.statusCode === 404) {
+      return res.status(404).json({
+        status: 'ERROR',
+        message: 'Student not found',
+      });
+    }
+    if (error.statusCode === 400) {
+      return res.status(400).json({ status: 'ERROR', message: error.message });
+    }
+    if (error.statusCode === 503) {
+      return res.status(503).json({ status: 'ERROR', message: error.message });
+    }
+    console.error('Error updating parent:', error);
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to update parent',
+      error: error.message,
+    });
+  }
+};
+
+const getMyParents = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({
+        status: 'ERROR',
+        message: 'Not authenticated',
+      });
+    }
+
+    const { parents } = await getParentsForUser(userId);
+
+    res.status(200).json({
+      status: 'SUCCESS',
+      message: 'Parents fetched successfully',
+      data: parents,
+      count: parents.length,
+      pagination: { page: 1, limit: parents.length, total: parents.length, totalPages: 1 },
+    });
+  } catch (error) {
+    console.error('Error fetching my parents:', error);
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to fetch parents',
+    });
+  }
+};
+
+const parentListSelectSql = `
+        s.id,
+        s.id AS student_id,
+        ${STUDENT_CONTACT_LATERAL_SELECT},
+        s.created_at,
+        s.updated_at AS updated_at,
+        u.first_name AS student_first_name,
+        u.last_name AS student_last_name,
+        NULLIF(TRIM(u.avatar), '') AS student_image_url,
+        s.admission_number,
+        s.roll_number,
+        c.class_name,
+        sec.section_name,
+        (SELECT g.user_id FROM student_guardian_links sgl
+          JOIN guardians g ON g.id = sgl.guardian_id
+          LEFT JOIN users u2 ON u2.id = g.user_id
+          WHERE sgl.student_id = s.id AND g.is_active = true
+            AND (
+              LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+              OR u2.role_id = ${ROLES.PARENT}
+            )
+          ORDER BY
+            CASE
+              WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 0
+              WHEN u2.role_id = ${ROLES.PARENT} THEN 2
+              ELSE 9
+            END,
+            g.id ASC
+          LIMIT 1) AS father_user_id`;
+
+const parentListJoins = `
+        FROM students s
+        LEFT JOIN users u ON s.user_id = u.id
+        ${lateralCurrentEnrollment('s.id')}
+        LEFT JOIN classes c ON enr.class_id = c.id
+        LEFT JOIN sections sec ON enr.section_id = sec.id
+        ${STUDENT_CONTACT_LATERAL_JOINS}`;
+
+const getAllParents = async (req, res) => {
+  try {
+    const { page, limit, offset } = parsePagination(req.query);
+    const academicYearId = req.query.academic_year_id ? parseInt(req.query.academic_year_id, 10) : null;
+    const hasYearFilter = academicYearId != null && !Number.isNaN(academicYearId);
+    const ctx = getAuthContext(req);
+    const isTeacher = ctx.roleId === ROLES.TEACHER || ctx.roleName === 'teacher';
+    const isAdm = isAdmin(ctx);
+
+    if (!isTeacher && !isAdm) {
+      return res.status(403).json({ status: 'ERROR', message: 'Access denied' });
+    }
+
+    let scopingSql = '';
+    let queryParams = [];
+
+    if (isTeacher) {
+      const teacherCheck = await query(
+        `SELECT st.id AS staff_id FROM staff st WHERE st.user_id = $1 AND st.status = 'Active'`,
+        [ctx.userId]
+      );
+      const teacherStaffIds = [...new Set(teacherCheck.rows.map((row) => parseId(row.staff_id)).filter(Boolean))];
+      if (!teacherStaffIds.length) {
+        return res.status(403).json({ status: 'ERROR', message: 'Access denied. User is not an active teacher.' });
+      }
+      queryParams = [teacherStaffIds];
+      scopingSql = `
+        AND EXISTS (
+          SELECT 1 FROM class_teachers ct
+          LEFT JOIN class_sections csec2 ON csec2.id = ct.class_section_id
+          WHERE ct.staff_id = ANY($1::int[])
+            AND ct.class_id = enr.class_id
+            AND (ct.class_section_id IS NULL OR csec2.section_id = enr.section_id)
+            AND ct.deleted_at IS NULL
+        )`;
+    }
+
+    const yearIdx = queryParams.length + 1;
+    const yearWhere = hasYearFilter ? ` AND enr.academic_year_id = $${yearIdx}` : '';
+    const countParams = hasYearFilter ? [...queryParams, academicYearId] : queryParams;
+    const listParams = hasYearFilter ? [...queryParams, academicYearId, limit, offset] : [...queryParams, limit, offset];
+    const limitOffsetIdx = hasYearFilter ? [yearIdx + 1, yearIdx + 2] : [yearIdx, yearIdx + 1];
+
+    const countResult = await query(
+      `SELECT COUNT(*)::int as total
+       FROM students s
+       ${lateralCurrentEnrollment('s.id')}
+       WHERE s.status = 'Active'
+         AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
+         ${scopingSql}${yearWhere}`,
+      countParams
+    );
+
+    const result = await query(
+      `SELECT ${parentListSelectSql}
+       ${parentListJoins}
+       WHERE s.status = 'Active'
+         AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
+         ${scopingSql}${yearWhere}
+       ORDER BY u.first_name ASC, u.last_name ASC
+       LIMIT $${limitOffsetIdx[0]} OFFSET $${limitOffsetIdx[1]}`,
+      listParams
+    );
+
+    const enrichedRows = await enrichRowsWithLegacyParentContacts(result.rows);
+
+    // Group by family identity to avoid duplicate cards for the same parents
+    const grouped = [];
+    const familyMap = new Map();
+
+    for (const row of enrichedRows) {
+      const familyKey = [
+        row.father_user_id,
+        row.father_email,
+        row.mother_person_id,
+        row.mother_email
+      ].filter(Boolean).join('|') || `fallback-s-${row.student_id}`;
+
+      if (familyMap.has(familyKey)) {
+        const existing = familyMap.get(familyKey);
+        if (!Array.isArray(existing.all_children)) {
+          existing.all_children = [
+            {
+              id: existing.student_id,
+              name: `${existing.student_first_name} ${existing.student_last_name}`.trim(),
+              admission_number: existing.admission_number,
+              class_name: existing.class_name,
+              section_name: existing.section_name,
+              photo_url: existing.student_image_url
+            }
+          ];
+        }
+        const alreadyIn = existing.all_children.some(c => String(c.id) === String(row.student_id));
+        if (!alreadyIn) {
+          existing.all_children.push({
+            id: row.student_id,
+            name: `${row.student_first_name} ${row.student_last_name}`.trim(),
+            admission_number: row.admission_number,
+            class_name: row.class_name,
+            section_name: row.section_name,
+            photo_url: row.student_image_url
+          });
+        }
+      } else {
+        const entry = {
+          ...row,
+          all_children: [
+            {
+              id: row.student_id,
+              name: `${row.student_first_name} ${row.student_last_name}`.trim(),
+              admission_number: row.admission_number,
+              class_name: row.class_name,
+              section_name: row.section_name,
+              photo_url: row.student_image_url
+            }
+          ]
+        };
+        familyMap.set(familyKey, entry);
+        grouped.push(entry);
+      }
+    }
+
+    const total = parseInt(countResult.rows[0].total, 10) || 0;
+    res.status(200).json({
+      status: 'SUCCESS',
+      message: 'Parents fetched successfully',
+      data: grouped,
+      count: grouped.length,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    console.error('Error fetching parents:', error);
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to fetch parents',
+      error: error.message,
+    });
+  }
+};
+
+/** :id is student id (contact aggregate per student). */
+const getParentById = async (req, res) => {
+  try {
+    const sid = parseId(req.params.id);
+    if (!sid) {
+      return res.status(400).json({ status: 'ERROR', message: 'Invalid student ID' });
+    }
+
+    const result = await fetchParentRowByStudentId(sid);
+    if (!result) {
+      return res.status(404).json({
+        status: 'ERROR',
+        message: 'Parent not found',
+      });
+    }
+
+    const ctx = getAuthContext(req);
+    if (!isAdmin(ctx)) {
+      const access = await canAccessStudent(req, sid);
+      if (!access.ok) {
+        return res.status(access.status || 403).json({ status: 'ERROR', message: access.message || 'Access denied' });
+      }
+    }
+
+    res.status(200).json({
+      status: 'SUCCESS',
+      message: 'Parent fetched successfully',
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error fetching parent:', error);
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to fetch parent',
+    });
+  }
+};
+
+const getParentByStudentId = async (req, res) => {
+  try {
+    const studentId = parseId(req.params.studentId);
+    if (!studentId) {
+      return res.status(400).json({ status: 'ERROR', message: 'Invalid student ID' });
+    }
+
+    const access = await canAccessStudent(req, studentId);
+    if (!access.ok) {
+      return res.status(access.status || 403).json({ status: 'ERROR', message: access.message || 'Access denied' });
+    }
+
+    const result = await fetchParentRowByStudentId(studentId);
+    if (!result) {
+      return res.status(404).json({
+        status: 'ERROR',
+        message: 'Parent not found for this student',
+      });
+    }
+
+    res.status(200).json({
+      status: 'SUCCESS',
+      message: 'Parent fetched successfully',
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error fetching parent by student ID:', error);
+    res.status(500).json({
+      status: 'ERROR',
+      message: 'Failed to fetch parent',
+    });
+  }
+};
+
+/**
+ * POST /api/parents/profile-image
+ * multipart file — JPG, PNG, SVG; max 4MB. Stored under school_{id}/uploads/ (relative path for users.avatar).
+ */
+const uploadParentProfileImage = async (req, res) => {
+  try {
+    const schoolId = getSchoolIdFromRequest(req);
+    if (!schoolId) {
+      return errorResponse(res, 401, 'School context required');
+    }
+    if (!req.file?.buffer) {
+      return errorResponse(res, 400, 'Missing file');
+    }
+    const provider = getStorageProvider();
+    const { relativePath } = await provider.upload(
+      {
+        buffer: req.file.buffer,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+      },
+      schoolId,
+      'users/parent'
+    );
+    const seg = relativePath.split('/');
+    const schoolKey = seg[0];
+    const fileName = seg[seg.length - 1];
+    const url = `/api/storage/files/${schoolKey}/users/parent/${encodeURIComponent(fileName)}`;
+    return success(res, 200, 'Uploaded', {
+      relativePath,
+      url,
+      profileImage: relativePath,
+    });
+  } catch (err) {
+    console.error('uploadParentProfileImage:', err.message);
+    if (String(err.message || '').includes('not allowed')) {
+      return errorResponse(res, 400, 'Only JPG, PNG, SVG allowed');
+    }
+    return errorResponse(res, 500, 'Upload failed');
+  }
+};
+
+function handleParentProfileMulterError(err, req, res, next) {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return errorResponse(res, 400, 'File too large (max 4MB)');
+    }
+    return errorResponse(res, 400, err.message);
+  }
+  if (err) {
+    return errorResponse(res, 400, err.message || 'Upload rejected');
+  }
+  next();
+}
+
+/**
+ * POST /api/parents/create-with-child
+ * Creates users row (parent role) and optionally links guardian (father) to student.
+ */
+const createParentWithChild = async (req, res) => {
+  try {
+    const schoolId = getSchoolIdFromRequest(req);
+    if (!schoolId) {
+      return errorResponse(res, 401, 'School context required');
+    }
+    const {
+      name, phone, email, student_id, profile_image_path,
+      mother_name, mother_phone, mother_email, mother_occupation,
+      mother_image_url
+    } = req.body;
+    const warnings = [];
+
+    const payload = await executeTransaction(async (client) => {
+      const slim = await guardiansIsSlimSchema(client);
+      if (!slim) {
+        const err = new Error('Database not migrated: run npm run db:migrate:unify');
+        err.statusCode = 503;
+        throw err;
+      }
+
+      const avatarPath = normalizeTenantProfilePath(schoolId, profile_image_path);
+      if (profile_image_path && !avatarPath) {
+        const err = new Error('Invalid profile_image_path for this school');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // If primary father details are missing, use mother's details for user account
+      const finalName = name || mother_name;
+      const finalPhone = phone || mother_phone;
+      const finalEmail = email || mother_email;
+
+      const { userId, reused } = await createOrReuseParentUser(
+        client,
+        {
+          fullName: finalName,
+          phone: finalPhone,
+          email: finalEmail,
+          avatarRelativePath: avatarPath || (mother_image_url ? normalizeTenantProfilePath(schoolId, mother_image_url) : null),
+        },
+        warnings
+      );
+
+      let studentName = null;
+      if (student_id != null) {
+        const sid = parseInt(student_id, 10);
+        if (!Number.isFinite(sid) || sid <= 0) {
+          const err = new Error('Invalid student_id');
+          err.statusCode = 400;
+          throw err;
+        }
+        const chk = await client.query('SELECT id, first_name, last_name FROM students WHERE id = $1 AND status = \'Active\' LIMIT 1', [sid]);
+        if (chk.rows.length === 0) {
+          const err = new Error('Student not found');
+          err.statusCode = 400;
+          throw err;
+        }
+
+        const hasFather = name || phone;
+        const hasMother = mother_name || mother_phone;
+
+        // Use syncStudentGuardians to handle both Father and Mother
+        await syncStudentGuardians(
+          client,
+          sid,
+          {
+            effFatherName: name || null,
+            effFatherEmail: email || null,
+            effFatherPhone: phone || null,
+            effFatherOcc: null,
+            effMotherName: mother_name || null,
+            effMotherEmail: mother_email || null,
+            effMotherPhone: mother_phone || null,
+            effMotherOcc: mother_occupation || null,
+            effGFirst: null,
+            effGLast: null,
+            effGPhone: null,
+            effGEmail: null,
+            effGOcc: null,
+            effGAddr: null,
+            effGRel: null,
+            fatherUserId: hasFather ? userId : null,
+            motherUserId: !hasFather && hasMother ? userId : null,
+            guardianUserId: null,
+          },
+          warnings
+        );
+
+        const r = chk.rows[0];
+        studentName = [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || null;
+
+        // Apply mother's avatar if provided
+        const motherLinked = await loadStudentLinkedUserIds(client.query.bind(client), sid);
+        if (mother_image_url && motherLinked.mother_person_id) {
+          const mAvatarPath = normalizeTenantProfilePath(schoolId, mother_image_url);
+          if (mAvatarPath) {
+            await client.query(`UPDATE users SET avatar = $1, updated_at = NOW() WHERE id = $2`, [
+              mAvatarPath,
+              motherLinked.mother_person_id,
+            ]);
+          }
+        }
+      }
+
+      return {
+        userId,
+        reused,
+        guardian,
+        studentId: student_id != null ? parseInt(student_id, 10) : null,
+        studentName,
+      };
+    });
+
+    return success(res, 201, 'Parent saved successfully', payload, { warnings });
+  } catch (error) {
+    console.error('createParentWithChild:', error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ status: 'ERROR', message: error.message });
+    }
+    if (error.statusCode === 503) {
+      return res.status(503).json({ status: 'ERROR', message: error.message });
+    }
+    res.status(500).json({ status: 'ERROR', message: 'Failed to create parent' });
+  }
+};
+
+module.exports = {
+  createParent,
+  updateParent,
+  getAllParents,
+  getMyParents,
+  getParentById,
+  getParentByStudentId,
+  uploadParentProfileImage,
+  handleParentProfileMulterError,
+  createParentWithChild,
+};

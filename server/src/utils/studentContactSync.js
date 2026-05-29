@@ -1,0 +1,658 @@
+/**
+ * Sync student ↔ guardian links (users as single source of contact data).
+ * Replaces parents table + parent_persons FKs.
+ */
+const {
+  getContactUserById,
+  ensureParentContactUser,
+  ensureGuardianContactUser,
+} = require('./contactUserService');
+
+async function guardiansIsSlimSchema(client) {
+  const r = await client.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'guardians' AND column_name = 'first_name'
+     LIMIT 1`
+  );
+  return r.rows.length === 0;
+}
+
+function splitFullName(fullName, fallbackFirstName = '') {
+  const norm = String(fullName || '').trim();
+  if (!norm) {
+    return { firstName: fallbackFirstName || '', lastName: '' };
+  }
+  const parts = norm.split(/\s+/);
+  return {
+    firstName: parts[0] || fallbackFirstName || '',
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
+/**
+ * Map guardian rows + users to legacy API field names for forms.
+ */
+function mapGuardianRowsToLegacyFields(rows) {
+  const out = {
+    father_name: '',
+    father_email: '',
+    father_phone: '',
+    father_occupation: '',
+    mother_name: '',
+    mother_email: '',
+    mother_phone: '',
+    mother_occupation: '',
+    guardian_first_name: '',
+    guardian_last_name: '',
+    guardian_relation: '',
+    guardian_phone: '',
+    guardian_email: '',
+    guardian_occupation: '',
+    guardian_address: '',
+  };
+  for (const row of rows) {
+    const fn = (row.first_name || '').toString().trim();
+    const ln = (row.last_name || '').toString().trim();
+    const name = [fn, ln].filter(Boolean).join(' ').trim();
+    const gt = (row.guardian_type || '').toString().toLowerCase();
+    if (gt === 'father') {
+      out.father_name = name;
+      out.father_email = row.email || '';
+      out.father_phone = row.phone || '';
+      out.father_occupation = row.occupation || '';
+    } else if (gt === 'mother') {
+      out.mother_name = name;
+      out.mother_email = row.email || '';
+      out.mother_phone = row.phone || '';
+      out.mother_occupation = row.occupation || '';
+    } else {
+      out.guardian_first_name = fn;
+      out.guardian_last_name = ln;
+      out.guardian_relation = row.relation || '';
+      out.guardian_phone = row.phone || '';
+      out.guardian_email = row.email || '';
+      out.guardian_occupation = row.occupation || '';
+      out.guardian_address = row.current_address || '';
+    }
+  }
+  return out;
+}
+
+/**
+ * Load guardian-linked users for a student (for GET /students/:id).
+ * @param {function} query - db query(text, params)
+ */
+async function loadStudentContactLegacyFields(query, studentId) {
+  const readFromUnifiedGuardians = async () => {
+    const linkSql = `
+      SELECT
+        CASE
+          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 'father'
+          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi') THEN 'mother'
+          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('guardian', 'legal guardian', 'other') THEN 'guardian'
+          ELSE LOWER(BTRIM(COALESCE(sgl.relation::text, '')))
+        END AS guardian_type,
+        sgl.relation,
+        u.first_name, u.last_name, u.email, u.phone, u.occupation, u.current_address
+      FROM student_guardian_links sgl
+      INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+      INNER JOIN users u ON u.id = g.user_id
+      WHERE sgl.student_id = $1
+      ORDER BY sgl.id ASC`;
+    try {
+      return await query(linkSql, [studentId]);
+    } catch (_) {
+      try {
+        return await query(
+          `SELECT g.guardian_type, g.relation,
+                  u.first_name, u.last_name, u.email, u.phone, u.occupation, u.current_address
+           FROM guardians g
+           INNER JOIN users u ON u.id = g.user_id
+           WHERE g.student_id = $1 AND g.is_active = true
+           ORDER BY g.id ASC`,
+          [studentId]
+        );
+      } catch (_2) {
+        return await query(
+          `SELECT g.guardian_type, g.relation,
+                  u.first_name, u.last_name, u.email, u.phone,
+                  NULL::text AS occupation,
+                  COALESCE(u.current_address, u.permanent_address) AS current_address
+           FROM guardians g
+           INNER JOIN users u ON u.id = g.user_id
+           WHERE g.student_id = $1 AND g.is_active = true
+           ORDER BY g.id ASC`,
+          [studentId]
+        );
+      }
+    }
+  };
+
+  let merged = {
+    father_name: '',
+    father_email: '',
+    father_phone: '',
+    father_occupation: '',
+    mother_name: '',
+    mother_email: '',
+    mother_phone: '',
+    mother_occupation: '',
+    guardian_first_name: '',
+    guardian_last_name: '',
+    guardian_relation: '',
+    guardian_phone: '',
+    guardian_email: '',
+    guardian_occupation: '',
+    guardian_address: '',
+  };
+
+  const unifiedRows = await readFromUnifiedGuardians();
+  if (Array.isArray(unifiedRows?.rows) && unifiedRows.rows.length > 0) {
+    merged = { ...merged, ...mapGuardianRowsToLegacyFields(unifiedRows.rows) };
+  }
+
+  // Legacy fallback: pull father/mother from old parents table when present.
+  try {
+    const pr = await query(
+      `SELECT
+          father_name, father_email, father_phone, father_occupation,
+          mother_name, mother_email, mother_phone, mother_occupation
+       FROM parents
+       WHERE student_id = $1
+       ORDER BY id DESC
+       LIMIT 1`,
+      [studentId]
+    );
+    if (pr.rows.length > 0) {
+      const p = pr.rows[0];
+      merged.father_name = merged.father_name || p.father_name || '';
+      merged.father_email = merged.father_email || p.father_email || '';
+      merged.father_phone = merged.father_phone || p.father_phone || '';
+      merged.father_occupation = merged.father_occupation || p.father_occupation || '';
+      merged.mother_name = merged.mother_name || p.mother_name || '';
+      merged.mother_email = merged.mother_email || p.mother_email || '';
+      merged.mother_phone = merged.mother_phone || p.mother_phone || '';
+      merged.mother_occupation = merged.mother_occupation || p.mother_occupation || '';
+    }
+  } catch (_) {
+    // parents table may not exist in fully unified deployments.
+  }
+
+  // Legacy fallback: old guardians schema where contact fields were stored directly in guardians.
+  try {
+    const gr = await query(
+      `SELECT
+          guardian_type,
+          relation,
+          first_name,
+          last_name,
+          email,
+          phone,
+          occupation,
+          address AS current_address
+       FROM guardians
+       WHERE student_id = $1 AND is_active = true
+       ORDER BY id ASC`,
+      [studentId]
+    );
+    if (gr.rows.length > 0) {
+      const legacyMapped = mapGuardianRowsToLegacyFields(gr.rows);
+      merged = {
+        ...legacyMapped,
+        ...merged,
+        father_name: merged.father_name || legacyMapped.father_name || '',
+        father_email: merged.father_email || legacyMapped.father_email || '',
+        father_phone: merged.father_phone || legacyMapped.father_phone || '',
+        father_occupation: merged.father_occupation || legacyMapped.father_occupation || '',
+        mother_name: merged.mother_name || legacyMapped.mother_name || '',
+        mother_email: merged.mother_email || legacyMapped.mother_email || '',
+        mother_phone: merged.mother_phone || legacyMapped.mother_phone || '',
+        mother_occupation: merged.mother_occupation || legacyMapped.mother_occupation || '',
+        guardian_first_name: merged.guardian_first_name || legacyMapped.guardian_first_name || '',
+        guardian_last_name: merged.guardian_last_name || legacyMapped.guardian_last_name || '',
+        guardian_relation: merged.guardian_relation || legacyMapped.guardian_relation || '',
+        guardian_phone: merged.guardian_phone || legacyMapped.guardian_phone || '',
+        guardian_email: merged.guardian_email || legacyMapped.guardian_email || '',
+        guardian_occupation: merged.guardian_occupation || legacyMapped.guardian_occupation || '',
+        guardian_address: merged.guardian_address || legacyMapped.guardian_address || '',
+      };
+    }
+  } catch (_) {
+    // Legacy columns are absent in slim schema; ignore.
+  }
+
+  const hasAny =
+    merged.father_name ||
+    merged.father_email ||
+    merged.father_phone ||
+    merged.mother_name ||
+    merged.mother_email ||
+    merged.mother_phone ||
+    merged.guardian_first_name ||
+    merged.guardian_last_name ||
+    merged.guardian_phone ||
+    merged.guardian_email;
+  return hasAny ? merged : null;
+}
+
+/**
+ * Resolve linked user id (father_person_id / mother_person_id / guardian_person_id in API = users.id).
+ */
+async function resolveLinkedUser(client, personId, allowedRoleIds) {
+  if (!personId) return null;
+  const prow = await getContactUserById(client, personId);
+  if (!prow) {
+    const err = new Error('Invalid contact user id');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (allowedRoleIds.length && !allowedRoleIds.includes(Number(prow.role_id))) {
+    const err = new Error('Contact user has wrong role for this slot');
+    err.statusCode = 400;
+    throw err;
+  }
+  return prow;
+}
+
+/**
+ * Create or replace guardian rows for a student. Sets students.guardian_id to primary row.
+ */
+async function syncStudentGuardians(client, studentId, payload, warnings) {
+  const slim = await guardiansIsSlimSchema(client);
+
+  const {
+    effFatherName,
+    effFatherEmail,
+    effFatherPhone,
+    effFatherOcc,
+    effMotherName,
+    effMotherEmail,
+    effMotherPhone,
+    effMotherOcc,
+    effGFirst,
+    effGLast,
+    effGPhone,
+    effGEmail,
+    effGOcc,
+    effGAddr,
+    effGRel,
+    fatherUserId: inFatherUid,
+    motherUserId: inMotherUid,
+    guardianUserId: inGuardianUid,
+  } = payload;
+
+  let fatherUserId = inFatherUid || null;
+  let motherUserId = inMotherUid || null;
+  let guardianUserId = inGuardianUid || null;
+
+  const hasFather =
+    effFatherName || effFatherEmail || effFatherPhone || effFatherOcc;
+  const hasMother =
+    effMotherName || effMotherEmail || effMotherPhone || effMotherOcc;
+  const gFull = [effGFirst, effGLast].filter(Boolean).join(' ').trim();
+  const hasG = gFull || effGPhone || effGEmail || effGOcc || effGRel;
+
+  // --- Cross-entity duplicate email check ---
+  // Emails must be unique across father / mother / guardian slots.
+  // If two slots share the same email we throw immediately so the transaction
+  // rolls back and the caller gets a 409 rather than silently corrupting data.
+  const emailSlots = [
+    { label: 'Father', email: (effFatherEmail || '').trim().toLowerCase() },
+    { label: 'Mother', email: (effMotherEmail || '').trim().toLowerCase() },
+    { label: 'Guardian', email: (effGEmail || '').trim().toLowerCase() },
+  ].filter(s => s.email !== '');
+
+  const seenEmails = new Map();
+  for (const { label, email } of emailSlots) {
+    if (seenEmails.has(email)) {
+      const firstLabel = seenEmails.get(email);
+      const err = new Error(
+        `Email "${email}" is already used for ${firstLabel}. Each contact (Father, Mother, Guardian) must have a unique email.`
+      );
+      err.statusCode = 409;
+      throw err;
+    }
+    seenEmails.set(email, label);
+  }
+  // --- End cross-entity duplicate email check ---
+
+  if (hasFather) {
+    fatherUserId = await ensureParentContactUser(
+      client,
+      {
+        id: fatherUserId,
+        full_name: effFatherName || 'Father',
+        email: effFatherEmail,
+        phone: effFatherPhone,
+        occupation: effFatherOcc,
+      },
+      warnings,
+      'Father'
+    );
+  }
+  if (hasMother) {
+    motherUserId = await ensureParentContactUser(
+      client,
+      {
+        id: motherUserId,
+        full_name: effMotherName || 'Mother',
+        email: effMotherEmail,
+        phone: effMotherPhone,
+        occupation: effMotherOcc,
+      },
+      warnings,
+      'Mother'
+    );
+  }
+  if (hasG) {
+    guardianUserId = await ensureGuardianContactUser(
+      client,
+      {
+        id: guardianUserId,
+        first_name: effGFirst || 'Guardian',
+        last_name: effGLast || '',
+        email: effGEmail,
+        phone: effGPhone,
+        occupation: effGOcc,
+        address: effGAddr,
+      },
+      warnings
+    );
+  }
+
+  // Final duplicate-email guard:
+  // Even when input emails look unique, resolved/reused users can still map
+  // multiple slots to the same normalized email in legacy guardians schema.
+  // Validate against effective user emails before INSERT to avoid DB 23505.
+  if (!slim) {
+    const slotRows = [
+      { label: 'Father', userId: fatherUserId },
+      { label: 'Mother', userId: motherUserId },
+      { label: 'Guardian', userId: guardianUserId },
+    ].filter((s) => Number.isFinite(Number(s.userId)) && Number(s.userId) > 0);
+
+    if (slotRows.length > 1) {
+      const emailBySlot = [];
+      for (const s of slotRows) {
+        const ures = await client.query(
+          `SELECT email FROM users WHERE id = $1 LIMIT 1`,
+          [s.userId]
+        );
+        const normalized = String(ures.rows[0]?.email || '')
+          .trim()
+          .toLowerCase();
+        if (normalized) emailBySlot.push({ label: s.label, email: normalized });
+      }
+
+      const seen = new Map();
+      for (const entry of emailBySlot) {
+        if (seen.has(entry.email)) {
+          const first = seen.get(entry.email);
+          const err = new Error(
+            `Duplicate guardian email "${entry.email}" for ${first} and ${entry.label}. Each contact (Father, Mother, Guardian) must have a unique email.`
+          );
+          err.statusCode = 409;
+          throw err;
+        }
+        seen.set(entry.email, entry.label);
+      }
+    }
+  }
+
+  if (slim) {
+    await client.query(`DELETE FROM student_guardian_links WHERE student_id = $1`, [studentId]);
+  } else {
+    await client.query(`DELETE FROM guardians WHERE student_id = $1`, [studentId]);
+  }
+
+  const rows = [];
+  if (fatherUserId) {
+    rows.push({
+      uid: fatherUserId,
+      type: 'father',
+      rel: 'Father',
+    });
+  }
+  if (motherUserId) {
+    rows.push({
+      uid: motherUserId,
+      type: 'mother',
+      rel: 'Mother',
+    });
+  }
+  if (guardianUserId) {
+    rows.push({
+      uid: guardianUserId,
+      type: 'guardian',
+      rel: effGRel || 'Guardian',
+    });
+  }
+
+  const primaryType = guardianUserId ? 'guardian' : fatherUserId ? 'father' : motherUserId ? 'mother' : null;
+
+  let primaryId = null;
+  for (const row of rows) {
+    const isPrimary = primaryType ? row.type === primaryType : rows.length === 1;
+    let ins;
+    if (slim) {
+      const insG = await client.query(
+        `INSERT INTO guardians (
+          user_id, annual_income, is_active, created_at, updated_at
+        ) VALUES ($1, $2, true, NOW(), NOW())
+        ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW()
+        RETURNING id`,
+        [row.uid, null]
+      );
+      const gid = insG.rows[0].id;
+      ins = await client.query(
+        `INSERT INTO student_guardian_links (
+          student_id, guardian_id, relation, is_primary_contact, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+        RETURNING id`,
+        [studentId, gid, row.rel, isPrimary]
+      );
+    } else {
+      const userRes = await client.query(
+        `SELECT first_name, last_name, phone, email, occupation, current_address
+         FROM users
+         WHERE id = $1
+         LIMIT 1`,
+        [row.uid]
+      );
+      const u = userRes.rows[0] || {};
+      const fallbackByType = (() => {
+        if (row.type === 'father') {
+          return {
+            ...splitFullName(effFatherName, 'Father'),
+            occupation: effFatherOcc || null,
+            address: null,
+          };
+        }
+        if (row.type === 'mother') {
+          return {
+            ...splitFullName(effMotherName, 'Mother'),
+            occupation: effMotherOcc || null,
+            address: null,
+          };
+        }
+        return {
+          firstName: effGFirst || 'Guardian',
+          lastName: effGLast || '',
+          occupation: effGOcc || null,
+          address: effGAddr || null,
+        };
+      })();
+      const firstName = (u.first_name || fallbackByType.firstName || '').toString().trim();
+      const lastName = (u.last_name || fallbackByType.lastName || '').toString().trim();
+      const phone = (u.phone || '').toString().trim();
+      const email = (u.email || '').toString().trim() || null;
+      const occupation = (u.occupation || fallbackByType.occupation || '').toString().trim() || null;
+      const address = (u.current_address || fallbackByType.address || '').toString().trim() || null;
+
+      ins = await client.query(
+        `INSERT INTO guardians (
+          student_id, user_id, guardian_type, relation,
+          is_primary_contact, is_emergency_contact, is_active,
+          first_name, last_name, phone, email, address, occupation,
+          created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+        RETURNING id`,
+        [
+          studentId,
+          row.uid,
+          row.type,
+          row.rel,
+          isPrimary,
+          false,
+          firstName || (row.type === 'father' ? 'Father' : row.type === 'mother' ? 'Mother' : 'Guardian'),
+          lastName || '',
+          phone || '',
+          email,
+          address,
+          occupation,
+        ]
+      );
+    }
+    if (isPrimary) primaryId = ins.rows[0].id;
+  }
+  if (!primaryId && rows.length > 0) {
+    const firstG = await client.query(
+      `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
+      [studentId]
+    );
+    primaryId = firstG.rows[0]?.id || null;
+  }
+
+  if (primaryId && !slim) {
+    await client.query(
+      `UPDATE guardians SET is_primary_contact = (id = $1), updated_at = NOW() WHERE student_id = $2`,
+      [primaryId, studentId]
+    );
+  }
+
+  return {
+    fatherUserId,
+    motherUserId,
+    guardianUserId,
+    primaryGuardianId: primaryId,
+  };
+}
+
+/**
+ * For edit form: father_person_id / mother_person_id / guardian_person_id = users.id
+ */
+async function loadStudentLinkedUserIds(query, studentId) {
+  const out = {
+    father_person_id: null,
+    mother_person_id: null,
+    guardian_person_id: null,
+  };
+  const mapRelation = (rel) => {
+    const r = String(rel || '').toLowerCase().trim();
+    if (['father', 'dad', 'papa', 'abbu'].includes(r)) return 'father';
+    if (['mother', 'mom', 'mummy', 'ammi'].includes(r)) return 'mother';
+    if (['guardian', 'legal guardian', 'other'].includes(r)) return 'guardian';
+    return r || 'guardian';
+  };
+  try {
+    const r = await query(
+      `SELECT sgl.relation, g.user_id
+       FROM student_guardian_links sgl
+       INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+       WHERE sgl.student_id = $1
+       ORDER BY sgl.id ASC`,
+      [studentId]
+    );
+    for (const row of r.rows) {
+      const t = mapRelation(row.relation);
+      if (t === 'father') out.father_person_id = row.user_id;
+      else if (t === 'mother') out.mother_person_id = row.user_id;
+      else if (t === 'guardian' || t === 'other') out.guardian_person_id = row.user_id;
+    }
+    return out;
+  } catch (_) {
+    try {
+      const r = await query(
+        `SELECT guardian_type, user_id FROM guardians WHERE student_id = $1 AND is_active = true`,
+        [studentId]
+      );
+      for (const row of r.rows) {
+        const t = (row.guardian_type || '').toString().toLowerCase();
+        if (t === 'father') out.father_person_id = row.user_id;
+        else if (t === 'mother') out.mother_person_id = row.user_id;
+        else if (t === 'guardian' || t === 'other') out.guardian_person_id = row.user_id;
+      }
+    } catch (_2) {
+      /* ignore */
+    }
+    return out;
+  }
+}
+
+/** List/detail SQL: contact fields from guardians + users (post-unify schema). */
+const STUDENT_CONTACT_LATERAL_SELECT = `
+      father_u.user_id AS father_person_id,
+      NULLIF(TRIM(CONCAT(COALESCE(father_u.first_name,''), ' ', COALESCE(father_u.last_name,''))), '') AS father_name,
+      father_u.email AS father_email,
+      father_u.phone AS father_phone,
+      father_u.occupation AS father_occupation,
+      father_u.avatar AS father_image_url,
+      mother_u.user_id AS mother_person_id,
+      NULLIF(TRIM(CONCAT(COALESCE(mother_u.first_name,''), ' ', COALESCE(mother_u.last_name,''))), '') AS mother_name,
+      mother_u.email AS mother_email,
+      mother_u.phone AS mother_phone,
+      mother_u.occupation AS mother_occupation,
+      mother_u.avatar AS mother_image_url,
+      gu_u.user_id AS guardian_person_id,
+      gu_u.first_name AS guardian_first_name,
+      gu_u.last_name AS guardian_last_name,
+      gu_u.phone AS guardian_phone,
+      gu_u.email AS guardian_email,
+      gu_u.occupation AS guardian_occupation,
+      gu_u.relation AS guardian_relation,
+      gu_u.current_address AS guardian_address,
+      gu_u.avatar AS guardian_image_url`;
+
+/** Canonical schema: links live on student_guardian_links; guardians has no student_id. */
+const STUDENT_CONTACT_LATERAL_JOINS = `
+      LEFT JOIN LATERAL (
+        SELECT u.id AS user_id, u.first_name, u.last_name, u.email, u.phone, u.occupation, u.avatar
+        FROM student_guardian_links sgl
+        INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+        INNER JOIN users u ON u.id = g.user_id
+        WHERE sgl.student_id = s.id
+          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+        ORDER BY sgl.id ASC
+        LIMIT 1
+      ) father_u ON true
+      LEFT JOIN LATERAL (
+        SELECT u.id AS user_id, u.first_name, u.last_name, u.email, u.phone, u.occupation, u.avatar
+        FROM student_guardian_links sgl
+        INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+        INNER JOIN users u ON u.id = g.user_id
+        WHERE sgl.student_id = s.id
+          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+        ORDER BY sgl.id ASC
+        LIMIT 1
+      ) mother_u ON true
+      LEFT JOIN LATERAL (
+        SELECT u.id AS user_id, u.first_name, u.last_name, u.email, u.phone, u.occupation, sgl.relation, u.current_address, u.avatar
+        FROM student_guardian_links sgl
+        INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+        INNER JOIN users u ON u.id = g.user_id
+        WHERE sgl.student_id = s.id
+          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+        ORDER BY sgl.id ASC
+        LIMIT 1
+      ) gu_u ON true`;
+
+module.exports = {
+  guardiansIsSlimSchema,
+  loadStudentContactLegacyFields,
+  loadStudentLinkedUserIds,
+  mapGuardianRowsToLegacyFields,
+  resolveLinkedUser,
+  syncStudentGuardians,
+  STUDENT_CONTACT_LATERAL_SELECT,
+  STUDENT_CONTACT_LATERAL_JOINS,
+};

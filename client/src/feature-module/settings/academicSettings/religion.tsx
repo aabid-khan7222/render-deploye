@@ -1,0 +1,377 @@
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useSelector } from "react-redux";
+import { apiService } from "../../../core/services/apiService";
+import { selectUser } from "../../../core/data/redux/authSlice";
+import { useCurrentUser } from "../../../core/hooks/useCurrentUser";
+import { isAdministrativeRole, isHeadmasterRole } from "../../../core/utils/roleUtils";
+
+const MASTER_SETTINGS_ROLE_IDS = new Set([1, 6]);
+
+type ReligionItem = {
+  id: number;
+  religion_name: string;
+  description?: string | null;
+  is_active: boolean;
+};
+
+const Religion = () => {
+  const { user: meUser, loading: meLoading } = useCurrentUser();
+  const reduxUser = useSelector(selectUser);
+
+  const isAdmin = useMemo(() => {
+    const candidates: Array<unknown> = [meUser, reduxUser].filter(Boolean);
+    if (candidates.length === 0) return false;
+    return candidates.some((candidate) => {
+      const c = candidate as { role_id?: number | string; user_role_id?: number | string };
+      const rawId = c.role_id ?? c.user_role_id;
+      const rid = Number(rawId);
+      if (Number.isFinite(rid) && MASTER_SETTINGS_ROLE_IDS.has(rid)) return true;
+      return isHeadmasterRole(candidate as Parameters<typeof isHeadmasterRole>[0])
+        || isAdministrativeRole(candidate as Parameters<typeof isAdministrativeRole>[0]);
+    });
+  }, [meUser, reduxUser]);
+
+  const sessionPending = meLoading && !meUser && !reduxUser;
+  const controlsLocked = !isAdmin;
+  const [religions, setReligions] = useState<ReligionItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const [newName, setNewName] = useState("");
+  const [newDescription, setNewDescription] = useState("");
+  const [newIsActive, setNewIsActive] = useState(true);
+
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editIsActive, setEditIsActive] = useState(true);
+
+  const loadReligions = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const res = await apiService.getReligions({ includeInactive: true });
+      setReligions(Array.isArray(res?.data) ? res.data : []);
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to load religions");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadReligions();
+  }, []);
+
+  const validatePayload = (name: string, description: string) => {
+    const trimmedName = name.trim();
+    const trimmedDescription = description.trim();
+    if (!trimmedName) return "Religion name is required.";
+    if (trimmedName.length > 50) return "Religion name must be 50 characters or fewer.";
+    if (trimmedDescription.length > 200) return "Description must be 200 characters or fewer.";
+    return "";
+  };
+
+  const handleAdd = async (e: FormEvent) => {
+    e.preventDefault();
+    if (controlsLocked) return;
+    const validationError = validatePayload(newName, newDescription);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    try {
+      setSaving(true);
+      setError("");
+      setMessage("");
+      await apiService.createReligion({
+        religion_name: newName.trim(),
+        description: newDescription.trim() || null,
+        is_active: newIsActive,
+      });
+      setNewName("");
+      setNewDescription("");
+      setNewIsActive(true);
+      setMessage("Religion added successfully.");
+      await loadReligions();
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to create religion");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEdit = (item: ReligionItem) => {
+    setEditingId(item.id);
+    setEditName(item.religion_name || "");
+    setEditDescription(item.description || "");
+    setEditIsActive(Boolean(item.is_active));
+    setError("");
+    setMessage("");
+  };
+
+  const handleEdit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (controlsLocked || editingId == null) return;
+    const validationError = validatePayload(editName, editDescription);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    try {
+      setSaving(true);
+      setError("");
+      setMessage("");
+      await apiService.updateReligion(editingId, {
+        religion_name: editName.trim(),
+        description: editDescription.trim() || null,
+        is_active: editIsActive,
+      });
+      setEditingId(null);
+      setMessage("Religion updated successfully.");
+      await loadReligions();
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to update religion");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleToggleStatus = async (id: number) => {
+    if (controlsLocked) return;
+    try {
+      setSaving(true);
+      setError("");
+      setMessage("");
+      await apiService.toggleReligionStatus(id);
+      setMessage("Religion status updated successfully.");
+      await loadReligions();
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to toggle religion status");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (controlsLocked) return;
+    if (!window.confirm("Delete this religion? This action cannot be undone.")) return;
+    try {
+      setSaving(true);
+      setError("");
+      setMessage("");
+      await apiService.deleteReligion(id);
+      setMessage("Religion deleted successfully.");
+      await loadReligions();
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to delete religion");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="page-wrapper">
+        <div className="content bg-white">
+          <form onSubmit={handleAdd}>
+            <div className="d-flex align-items-center justify-content-between flex-wrap border-bottom pt-3 mb-3">
+              <div className="mb-3">
+                <h5 className="mb-1">Religion</h5>
+                <p>Manage active and inactive religions</p>
+              </div>
+              <div className="mb-3">
+                <button
+                  className="btn btn-light me-2"
+                  type="button"
+                  onClick={() => loadReligions()}
+                  disabled={saving || loading || sessionPending}
+                >
+                  Refresh
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={controlsLocked || saving || loading || sessionPending}>
+                  Add Religion
+                </button>
+              </div>
+            </div>
+                  {sessionPending && <div className="alert alert-info">Loading your session…</div>}
+                  {loading && !sessionPending && <div className="alert alert-info">Loading religions...</div>}
+                  {!!message && <div className="alert alert-success">{message}</div>}
+                  {!!error && <div className="alert alert-danger">{error}</div>}
+                  {!sessionPending && controlsLocked && (
+                    <div className="alert alert-warning">
+                      Only Headmaster or Administrative can manage religions.
+                    </div>
+                  )}
+                  <div className="border rounded p-3 mb-3">
+                    <div className="row">
+                      <div className="col-md-5">
+                        <div className="mb-3">
+                          <label className="form-label">Religion Name</label>
+                          <input
+                            type="text"
+                            className="form-control"
+                            placeholder="Enter religion name"
+                            value={newName}
+                            maxLength={50}
+                            onChange={(e) => setNewName(e.target.value)}
+                            disabled={controlsLocked || saving || loading}
+                          />
+                        </div>
+                      </div>
+                      <div className="col-md-5">
+                        <div className="mb-3">
+                          <label className="form-label">Description (Optional)</label>
+                          <input
+                            type="text"
+                            className="form-control"
+                            placeholder="Enter description"
+                            value={newDescription}
+                            maxLength={200}
+                            onChange={(e) => setNewDescription(e.target.value)}
+                            disabled={controlsLocked || saving || loading}
+                          />
+                        </div>
+                      </div>
+                      <div className="col-md-2 d-flex align-items-center">
+                        <div className="form-check mt-2">
+                          <input
+                            className="form-check-input"
+                            type="checkbox"
+                            id="religion-active"
+                            checked={newIsActive}
+                            onChange={(e) => setNewIsActive(e.target.checked)}
+                            disabled={controlsLocked || saving || loading}
+                          />
+                          <label className="form-check-label" htmlFor="religion-active">
+                            Active
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="d-md-flex">
+                    <div className="row flex-fill">
+                      {religions.map((item) => (
+                        <div className="col-xxl-4 col-md-6" key={item.id}>
+                          <div className="bg-white p-3 border rounded mb-3">
+                            <div className="d-flex align-items-center justify-content-between">
+                              <div>
+                                <h5 className="fs-15 fw-normal mb-1">{item.religion_name}</h5>
+                                <small className={item.is_active ? "text-success" : "text-muted"}>
+                                  {item.is_active ? "Active" : "Inactive"}
+                                </small>
+                              </div>
+                              <div className="d-flex align-items-center">
+                                <div className="status-toggle modal-status">
+                                  <input
+                                    type="checkbox"
+                                    id={`religion-${item.id}`}
+                                    className="check"
+                                    checked={item.is_active}
+                                    onChange={() => handleToggleStatus(item.id)}
+                                    disabled={controlsLocked || saving || loading}
+                                  />
+                                  <label htmlFor={`religion-${item.id}`} className="checktoggle">
+                                    {" "}
+                                  </label>
+                                </div>
+                                <div className="d-flex align-items-center ms-3">
+                                  <button
+                                    type="button"
+                                    className="btn btn-link p-0 text-dark"
+                                    onClick={() => startEdit(item)}
+                                    disabled={controlsLocked || saving || loading}
+                                  >
+                                    <i className="ti ti-edit me-2" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-link p-0 text-danger"
+                                    onClick={() => handleDelete(item.id)}
+                                    disabled={controlsLocked || saving || loading}
+                                  >
+                                    <i className="ti ti-trash" />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                            {!!item.description && (
+                              <p className="mb-0 text-muted mt-2">{item.description}</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+          </form>
+          {editingId != null && (
+            <form className="border rounded p-3 mt-3" onSubmit={handleEdit}>
+              <div className="d-flex align-items-center justify-content-between mb-3">
+                <h6 className="mb-0">Edit Religion</h6>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-light"
+                  onClick={() => setEditingId(null)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="row">
+                <div className="col-md-5">
+                  <div className="mb-3">
+                    <label className="form-label">Religion Name</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={editName}
+                      maxLength={50}
+                      onChange={(e) => setEditName(e.target.value)}
+                      disabled={saving || loading}
+                    />
+                  </div>
+                </div>
+                <div className="col-md-5">
+                  <div className="mb-3">
+                    <label className="form-label">Description</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={editDescription}
+                      maxLength={200}
+                      onChange={(e) => setEditDescription(e.target.value)}
+                      disabled={saving || loading}
+                    />
+                  </div>
+                </div>
+                <div className="col-md-2 d-flex align-items-center">
+                  <div className="form-check mt-2">
+                    <input
+                      className="form-check-input"
+                      type="checkbox"
+                      id="edit-religion-active"
+                      checked={editIsActive}
+                      onChange={(e) => setEditIsActive(e.target.checked)}
+                      disabled={saving || loading}
+                    />
+                    <label className="form-check-label" htmlFor="edit-religion-active">
+                      Active
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={controlsLocked || saving || loading}>
+                Save Changes
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Religion;
+

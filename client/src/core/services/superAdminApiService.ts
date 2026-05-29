@@ -1,0 +1,517 @@
+import { isDev, isProd } from '../utils/runtimeEnv';
+import {
+  resolveCsrfTokenForRequest,
+  setCachedCsrfToken,
+  clearCachedCsrfToken,
+} from '../utils/csrfClientStore.js';
+
+const BUILD_API_URL = import.meta.env.VITE_API_URL || '/api';
+
+let cachedSuperAdminBaseUrl: string | null = null;
+
+async function getSuperAdminApiBaseUrl(): Promise<string> {
+  if (cachedSuperAdminBaseUrl) return cachedSuperAdminBaseUrl;
+
+  // In production, prefer public/config.json (same as tenant API service),
+  // then convert /api -> /super-admin/api.
+  let baseApiUrl = BUILD_API_URL;
+  if (isProd) {
+    try {
+      const res = await fetch('/config.json', { cache: 'no-store' });
+      if (res.ok) {
+        const config = await res.json();
+        if (config && config.apiUrl) {
+          baseApiUrl = String(config.apiUrl).replace(/\/+$/, '');
+          if (!baseApiUrl.endsWith('/api')) baseApiUrl += '/api';
+        }
+      }
+    } catch {
+      // fall back to build-time URL
+    }
+  }
+
+  // Convert base API URL to Super Admin API URL.
+  let base = baseApiUrl;
+  if (base.endsWith('/api')) {
+    base = base.replace(/\/api$/, '/super-admin/api');
+  } else {
+    base = base.replace(/\/+$/, '') + '/super-admin/api';
+  }
+
+  cachedSuperAdminBaseUrl = base;
+  return base;
+}
+
+type RequestMeta = { sessionProbe?: boolean };
+
+class SuperAdminApiService {
+  async makeRequest(endpoint: string, options: RequestInit = {}, meta?: RequestMeta) {
+    const base = await getSuperAdminApiBaseUrl();
+    const url = `${base}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+
+    if (isDev && !meta?.sessionProbe) {
+      console.log('[SuperAdmin] API request:', url);
+    }
+
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...(options.headers || {}),
+    };
+
+    const method = String(options.method || 'GET').toUpperCase();
+    const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    if (unsafe) {
+      const csrf = resolveCsrfTokenForRequest();
+      if (csrf) (headers as Record<string, string>)['X-XSRF-TOKEN'] = csrf;
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: options.method || 'GET',
+        headers,
+        credentials: 'include',
+        ...options,
+        cache: options.cache !== undefined ? options.cache : 'no-store',
+      });
+
+      if (isDev && !meta?.sessionProbe) {
+        console.log('[SuperAdmin] Response status:', response.status);
+      }
+
+      if (!response.ok) {
+        const text = await response.text();
+        const quietSession = meta?.sessionProbe && response.status === 401;
+        if (isDev && !quietSession) console.error('[SuperAdmin] Error response:', text);
+        if (isDev && quietSession) {
+          console.debug('[SuperAdmin] Session check: not logged in (401).');
+        }
+        let apiMessage = text || `HTTP error ${response.status}`;
+        try {
+          const j = JSON.parse(text) as { message?: string };
+          if (j && typeof j.message === 'string' && j.message.trim()) {
+            apiMessage = j.message.trim();
+          }
+        } catch {
+          /* use raw text */
+        }
+        // 401 = missing/expired Super Admin session — clear client auth (not for silent session probe).
+        // 403 = wrong password / forbidden action — must NOT log the user out.
+        if (response.status === 401 && !meta?.sessionProbe) {
+          window.dispatchEvent(new CustomEvent('super-admin:sessionInvalid'));
+        }
+        const err = new Error(apiMessage) as Error & { status?: number };
+        err.status = response.status;
+        throw err;
+      }
+
+      const text = await response.text();
+      if (!text || !text.trim()) {
+        throw new Error('Empty response from Super Admin API');
+      }
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error('Invalid JSON from Super Admin API');
+      }
+      return data;
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status;
+      const quiet401 = meta?.sessionProbe && status === 401;
+      if (isDev && !quiet401) console.error('[SuperAdmin] API request failed:', err);
+      if (isDev && quiet401) console.debug('[SuperAdmin] Session probe finished without a session.');
+      throw err;
+    }
+  }
+
+  // Auth
+  async login(emailOrUsername: string, password: string) {
+    const data = await this.makeRequest('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ emailOrUsername, password }),
+    });
+    const token = (data as { data?: { csrfToken?: string } })?.data?.csrfToken;
+    if (token) setCachedCsrfToken(token);
+    return data;
+  }
+
+  /** Cross-origin SPA: sync XSRF into memory (cookie is on API host only). */
+  async ensureCsrfToken() {
+    const base = await getSuperAdminApiBaseUrl();
+    const url = `${base}/auth/csrf-token`.replace(/([^:]\/)\/+/g, '$1');
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        mode: 'cors',
+        headers: { Accept: 'application/json' },
+      });
+      const text = await res.text();
+      if (!res.ok || !text) return;
+      const data = JSON.parse(text) as { data?: { csrfToken?: string } };
+      const token = data?.data?.csrfToken;
+      if (token) setCachedCsrfToken(token);
+    } catch {
+      // ignore
+    }
+  }
+
+  /** SPA bootstrap: always 200 — no 401 in DevTools when logged out (see GET /auth/session). */
+  async getSession() {
+    return this.makeRequest('/auth/session');
+  }
+
+  async getProfile() {
+    return this.makeRequest('/me', {}, { sessionProbe: true });
+  }
+
+  async logout() {
+    try {
+      return await this.makeRequest('/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    } finally {
+      clearCachedCsrfToken();
+    }
+  }
+
+  async changePassword(currentPassword: string, newPassword: string, confirmPassword: string) {
+    return this.makeRequest('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+    });
+  }
+
+  async updateProfile(username: string, currentPassword: string) {
+    return this.makeRequest('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ username, currentPassword }),
+    });
+  }
+
+  // Schools
+  async listSchools(status?: string, q?: string) {
+    const qs = new URLSearchParams();
+    if (status) qs.set('status', status);
+    if (q && q.trim()) qs.set('q', q.trim());
+    const s = qs.toString();
+    return this.makeRequest(`/schools${s ? `?${s}` : ''}`);
+  }
+
+  async updateSchoolStatus(id: number, status: 'active' | 'disabled') {
+    return this.makeRequest(`/schools/${id}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  async getSchoolById(id: number) {
+    return this.makeRequest(`/schools/${id}`);
+  }
+
+  async updateSchool(
+    id: number,
+    payload: {
+      school_name?: string;
+      institute_number?: string;
+      type?: string | null;
+    }
+  ) {
+    return this.makeRequest(`/schools/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Two-step protected delete: password → short-lived token → soft-delete school record.
+   */
+  async deleteSchool(id: number, password: string) {
+    const challenge = await this.makeRequest(`/schools/${id}/delete-challenge`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    const deleteToken = (challenge as { data?: { deleteToken?: string } })?.data?.deleteToken;
+    if (!deleteToken) {
+      throw new Error('Delete confirmation was not issued');
+    }
+    return this.makeRequest(`/schools/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ password, deleteToken }),
+    });
+  }
+
+  async createSchool(payload: {
+    school_name: string;
+    type: string;
+    institute_number: string;
+    admin_name: string;
+    admin_email: string;
+    admin_password: string;
+  }) {
+    return this.makeRequest('/schools', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // Platform stats
+  async getPlatformStats() {
+    return this.makeRequest('/stats/platform');
+  }
+
+  async impersonateSchool(id: number) {
+    return this.makeRequest(`/schools/${id}/impersonate`, { method: 'POST', body: JSON.stringify({}) });
+  }
+
+  async updateSchoolPlan(id: number, plan_id: number | null) {
+    return this.makeRequest(`/schools/${id}/plan`, {
+      method: 'PATCH',
+      body: JSON.stringify({ plan_id }),
+    });
+  }
+
+  async getSchoolModules(id: number) {
+    return this.makeRequest(`/schools/${id}/modules`);
+  }
+
+  async putSchoolModuleOverrides(id: number, overrides: { module_key: string; show_in_menu: boolean; route_accessible: boolean }[]) {
+    return this.makeRequest(`/schools/${id}/modules/overrides`, {
+      method: 'PUT',
+      body: JSON.stringify({ overrides }),
+    });
+  }
+
+  async listPlans() {
+    return this.makeRequest('/plans');
+  }
+
+  async createPlan(payload: {
+    name: string;
+    slug: string;
+    description?: string | null;
+    sort_order?: number;
+    is_active?: boolean;
+    price_amount?: number;
+    billing_interval?: string;
+    setup_fee?: number;
+    trial_days?: number;
+  }) {
+    return this.makeRequest('/plans', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async updatePlan(id: number, payload: {
+    name?: string;
+    description?: string | null;
+    sort_order?: number;
+    is_active?: boolean;
+    price_amount?: number;
+    billing_interval?: string;
+    setup_fee?: number;
+    trial_days?: number;
+  }) {
+    return this.makeRequest(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  }
+
+  async getPlanModules(id: number) {
+    return this.makeRequest(`/plans/${id}/modules`);
+  }
+
+  async putPlanModules(id: number, modules: Record<string, { show_in_menu: boolean; route_accessible: boolean }>) {
+    return this.makeRequest(`/plans/${id}/modules`, {
+      method: 'PUT',
+      body: JSON.stringify({ modules }),
+    });
+  }
+
+  async listEnquiries(status?: string) {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.makeRequest(`/enquiries${qs}`);
+  }
+
+  async createEnquiry(payload: {
+    contact_name: string;
+    organization_name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    message?: string | null;
+  }) {
+    return this.makeRequest('/enquiries', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async patchEnquiry(id: number, status: 'new' | 'contacted' | 'converted' | 'dismissed') {
+    return this.makeRequest(`/enquiries/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  // Help Center CMS
+  async listHelpCategories() {
+    return this.makeRequest('/help/categories');
+  }
+
+  async createHelpCategory(payload: {
+    slug: string;
+    name: string;
+    description?: string;
+    icon?: string;
+    sort_order?: number;
+    is_active?: boolean;
+  }) {
+    return this.makeRequest('/help/categories', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async patchHelpCategory(
+    id: number,
+    payload: {
+      slug?: string;
+      name?: string;
+      description?: string;
+      icon?: string;
+      sort_order?: number;
+      is_active?: boolean;
+    }
+  ) {
+    return this.makeRequest(`/help/categories/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteHelpCategory(id: number) {
+    return this.makeRequest(`/help/categories/${id}`, { method: 'DELETE' });
+  }
+
+  async listHelpArticles() {
+    return this.makeRequest('/help/articles');
+  }
+
+  async getHelpArticle(id: number) {
+    return this.makeRequest(`/help/articles/${id}`);
+  }
+
+  async createHelpArticle(payload: {
+    category_id: number;
+    title: string;
+    description?: string;
+    content: string;
+    status?: string;
+    sort_order?: number;
+  }) {
+    return this.makeRequest('/help/articles', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async patchHelpArticle(
+    id: number,
+    payload: {
+      category_id?: number;
+      title?: string;
+      description?: string;
+      content?: string;
+      status?: string;
+      sort_order?: number;
+    }
+  ) {
+    return this.makeRequest(`/help/articles/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteHelpArticle(id: number) {
+    return this.makeRequest(`/help/articles/${id}`, { method: 'DELETE' });
+  }
+
+  async listHelpFaqs() {
+    return this.makeRequest('/help/faqs');
+  }
+
+  async createHelpFaq(payload: {
+    category_slug?: string | null;
+    question: string;
+    answer: string;
+    sort_order?: number;
+    is_active?: boolean;
+  }) {
+    return this.makeRequest('/help/faqs', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  async patchHelpFaq(
+    id: number,
+    payload: {
+      category_slug?: string | null;
+      question?: string;
+      answer?: string;
+      sort_order?: number;
+      is_active?: boolean;
+    }
+  ) {
+    return this.makeRequest(`/help/faqs/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteHelpFaq(id: number) {
+    return this.makeRequest(`/help/faqs/${id}`, { method: 'DELETE' });
+  }
+
+  async listSupportTickets(params: Record<string, string | number | undefined> = {}) {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v != null && v !== '') search.set(k, String(v));
+    });
+    const qs = search.toString();
+    return this.makeRequest(`/support/tickets${qs ? `?${qs}` : ''}`);
+  }
+
+  async getSupportTicket(id: number) {
+    return this.makeRequest(`/support/tickets/${id}`);
+  }
+
+  async patchSupportTicket(id: number, payload: { status?: string }) {
+    return this.makeRequest(`/support/tickets/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async replySupportTicket(id: number, payload: { message: string; is_internal_note?: boolean }) {
+    return this.makeRequest(`/support/tickets/${id}/replies`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  getSupportAttachmentUrl(ticketId: number, attachmentId: number) {
+    return `/super-admin/api/support/tickets/${ticketId}/attachments/${attachmentId}`;
+  }
+
+  async fetchSupportAttachment(ticketId: number, attachmentId: number): Promise<Blob> {
+    const base = await getSuperAdminApiBaseUrl();
+    const url = `${base}/support/tickets/${ticketId}/attachments/${attachmentId}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      headers: { Accept: '*/*' },
+    });
+    if (!res.ok) {
+      let msg = 'Failed to load attachment';
+      try {
+        const j = (await res.json()) as { message?: string };
+        if (j?.message) msg = j.message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    return res.blob();
+  }
+}
+
+const superAdminApiService = new SuperAdminApiService();
+export { superAdminApiService };

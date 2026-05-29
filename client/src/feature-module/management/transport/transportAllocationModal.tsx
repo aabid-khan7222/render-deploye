@@ -1,0 +1,841 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import CommonSelect from "../../../core/common/commonSelect";
+import { apiService } from "../../../core/services/apiService";
+import Swal from "sweetalert2";
+import dayjs from "dayjs";
+import { DatePicker } from "antd";
+import { useSelector } from "react-redux";
+import { selectSelectedAcademicYearId } from "../../../core/data/redux/academicYearSlice";
+
+interface Props {
+  selectedAllocation?: any;
+  deleteId?: number | null;
+  onSuccess?: () => void;
+}
+
+const hideModal = (id: string) => {
+  const el = document.getElementById(id);
+  const bootstrap = (window as any).bootstrap;
+  if (!el || !bootstrap?.Modal) return;
+  const m = bootstrap.Modal.getInstance(el);
+  if (m) m.hide();
+};
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+const TransportAllocationModal = ({ selectedAllocation, deleteId, onSuccess }: Props) => {
+  const academicYearId = useSelector(selectSelectedAcademicYearId);
+  const [loading, setLoading] = useState(false);
+  const [students, setStudents] = useState<any[]>([]);
+  const [staff, setStaff] = useState<any[]>([]);
+  const [pickupPoints, setPickupPoints] = useState<any[]>([]);
+  const [fees, setFees] = useState<any[]>([]);
+
+  const [singleUserType, setSingleUserType] = useState("student");
+  const [singleUserId, setSingleUserId] = useState("");
+  const [singlePickupPointId, setSinglePickupPointId] = useState("");
+  const [singleVehicleRouteAssignmentId, setSingleVehicleRouteAssignmentId] = useState("");
+  const [singleAssignedFeeId, setSingleAssignedFeeId] = useState("");
+  const [singleIsFree, setSingleIsFree] = useState(false);
+  const [singleStartDate, setSingleStartDate] = useState(today());
+  const [singleEndDate, setSingleEndDate] = useState("");
+  const [singleStatus, setSingleStatus] = useState("Active");
+  const [singleAvailableAssignments, setSingleAvailableAssignments] = useState<any[]>([]);
+
+  const [bulkUserType, setBulkUserType] = useState("student");
+  const [bulkPickupPointId, setBulkPickupPointId] = useState("");
+  const [bulkVehicleRouteAssignmentId, setBulkVehicleRouteAssignmentId] = useState("");
+  const [bulkAssignedFeeId, setBulkAssignedFeeId] = useState("");
+  const [bulkIsFree, setBulkIsFree] = useState(false);
+  const [bulkStartDate, setBulkStartDate] = useState(today());
+  const [bulkEndDate, setBulkEndDate] = useState("");
+  const [bulkStatus, setBulkStatus] = useState("Active");
+  const [bulkAvailableAssignments, setBulkAvailableAssignments] = useState<any[]>([]);
+  const [bulkSeatAvailability, setBulkSeatAvailability] = useState<{ available: number; occupied: number; capacity: number } | null>(null);
+  const [bulkSelectedUserIds, setBulkSelectedUserIds] = useState<number[]>([]);
+  const [bulkSearch, setBulkSearch] = useState("");
+  const [bulkClassFilter, setBulkClassFilter] = useState("all");
+  const [bulkSectionFilter, setBulkSectionFilter] = useState("all");
+  const [bulkDepartmentFilter, setBulkDepartmentFilter] = useState("all");
+  const hydratingSinglePickupRef = useRef(false);
+  const isEditMode = Boolean(selectedAllocation?.originalData?.id);
+
+  const toErrorText = (err: any, fallback: string) => {
+    let msg: any = err?.message || fallback;
+    if (typeof msg === "string" && msg.includes("message:")) {
+      try {
+        const raw = msg.substring(msg.indexOf("message:") + "message:".length).trim();
+        const parsed = JSON.parse(raw);
+        msg = parsed?.message || msg;
+      } catch {
+        // keep original
+      }
+    }
+    if (typeof msg === "string") {
+      msg = msg
+        .replace(/^HTTP error! status:\s*\d+,\s*/i, "")
+        .replace(/^status:\s*\d+,\s*/i, "")
+        .trim();
+      if (!msg) msg = fallback;
+    }
+    return typeof msg === "string" ? msg : fallback;
+  };
+
+  useEffect(() => {
+    const loadBase = async () => {
+      try {
+        const [sRes, stRes, pRes, fRes] = await Promise.all([
+          (apiService as any).getStudents(academicYearId ?? undefined),
+          apiService.getStaff(),
+          apiService.getTransportPickupPoints({ limit: 1000, status: "active", academic_year_id: academicYearId ?? undefined }),
+          apiService.getTransportFees({ limit: 1000, status: "active", academic_year_id: academicYearId ?? undefined }),
+        ]);
+        if (sRes?.status === "SUCCESS") setStudents(sRes.data || []);
+        if (stRes?.status === "SUCCESS") setStaff(stRes.data || []);
+        if (pRes?.status === "SUCCESS") setPickupPoints(pRes.data || []);
+        if (fRes?.status === "SUCCESS") setFees(fRes.data || []);
+      } catch {
+        // ignore
+      }
+    };
+    loadBase();
+  }, [academicYearId]);
+
+  useEffect(() => {
+    if (selectedAllocation?.originalData) {
+      const row = selectedAllocation.originalData;
+      hydratingSinglePickupRef.current = true;
+      setSingleUserType(row.user_type || "student");
+      setSingleUserId(String(row.student_id || row.staff_id || row.user_id || ""));
+      setSinglePickupPointId(String(row.pickup_point_id || ""));
+      setSingleVehicleRouteAssignmentId(
+        row.vehicle_route_assignment_id != null && row.vehicle_route_assignment_id !== ""
+          ? String(row.vehicle_route_assignment_id)
+          : ""
+      );
+      setSingleAssignedFeeId(String(row.fee_master_id || row.assigned_fee_id || ""));
+      setSingleIsFree(Boolean(row.is_free));
+      setSingleStartDate(row.start_date || today());
+      setSingleEndDate(row.end_date || "");
+      setSingleStatus(row.status || "Active");
+      return;
+    }
+    setSingleUserType("student");
+    setSingleUserId("");
+    setSinglePickupPointId("");
+    setSingleVehicleRouteAssignmentId("");
+    setSingleAssignedFeeId("");
+    setSingleIsFree(false);
+    setSingleStartDate(today());
+    setSingleEndDate("");
+    setSingleStatus("Active");
+  }, [selectedAllocation]);
+
+  const loadAssignmentsForPickup = async (pickupPointId: string, setter: (rows: any[]) => void) => {
+    if (!pickupPointId || academicYearId == null) {
+      setter([]);
+      return;
+    }
+    const res = await apiService.getTransportAssignments({
+      limit: 500,
+      status: "active",
+      academic_year_id: academicYearId,
+      pickup_point_id: pickupPointId,
+    });
+    setter(res?.status === "SUCCESS" ? res.data || [] : []);
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      if (!singlePickupPointId) {
+        setSingleAvailableAssignments([]);
+        if (!hydratingSinglePickupRef.current) setSingleVehicleRouteAssignmentId("");
+        hydratingSinglePickupRef.current = false;
+        return;
+      }
+      await loadAssignmentsForPickup(singlePickupPointId, setSingleAvailableAssignments);
+      if (!hydratingSinglePickupRef.current) {
+        setSingleVehicleRouteAssignmentId("");
+        setSingleAssignedFeeId("");
+      }
+      hydratingSinglePickupRef.current = false;
+    };
+    run();
+  }, [singlePickupPointId, academicYearId]);
+
+  useEffect(() => {
+    const run = async () => {
+      if (!bulkPickupPointId) {
+        setBulkAvailableAssignments([]);
+        setBulkVehicleRouteAssignmentId("");
+        return;
+      }
+      await loadAssignmentsForPickup(bulkPickupPointId, setBulkAvailableAssignments);
+      setBulkVehicleRouteAssignmentId("");
+      setBulkAssignedFeeId("");
+    };
+    run();
+  }, [bulkPickupPointId, academicYearId]);
+
+  useEffect(() => {
+    const vid = bulkAvailableAssignments.find(
+      (a: any) => String(a.id) === String(bulkVehicleRouteAssignmentId)
+    )?.vehicle_id;
+    const loadSeatAvailability = async () => {
+      if (!vid || !bulkStartDate) {
+        setBulkSeatAvailability(null);
+        return;
+      }
+      try {
+        const res = await apiService.getTransportSeatAvailability({
+          vehicle_id: Number(vid),
+          start_date: bulkStartDate,
+        });
+        if (res?.status === "SUCCESS" && res?.data) {
+          setBulkSeatAvailability({
+            available: Number(res.data.available || 0),
+            occupied: Number(res.data.occupied || 0),
+            capacity: Number(res.data.capacity || 0),
+          });
+        } else {
+          setBulkSeatAvailability(null);
+        }
+      } catch {
+        setBulkSeatAvailability(null);
+      }
+    };
+    loadSeatAvailability();
+  }, [bulkVehicleRouteAssignmentId, bulkStartDate, bulkAvailableAssignments]);
+
+  const resetSingleAddForm = () => {
+    setSingleUserType("student");
+    setSingleUserId("");
+    setSinglePickupPointId("");
+    setSingleVehicleRouteAssignmentId("");
+    setSingleAssignedFeeId("");
+    setSingleIsFree(false);
+    setSingleStartDate(today());
+    setSingleEndDate("");
+    setSingleStatus("Active");
+    setSingleAvailableAssignments([]);
+  };
+
+  const resetBulkForm = () => {
+    setBulkUserType("student");
+    setBulkPickupPointId("");
+    setBulkVehicleRouteAssignmentId("");
+    setBulkAssignedFeeId("");
+    setBulkIsFree(false);
+    setBulkStartDate(today());
+    setBulkEndDate("");
+    setBulkStatus("Active");
+    setBulkAvailableAssignments([]);
+    setBulkSelectedUserIds([]);
+    setBulkSearch("");
+    setBulkClassFilter("all");
+    setBulkSectionFilter("all");
+    setBulkDepartmentFilter("all");
+  };
+
+  useEffect(() => {
+    const addEl = document.getElementById("add_transport_allocation");
+    const bulkEl = document.getElementById("add_transport_allocation_bulk");
+    const onAddShow = () => resetSingleAddForm();
+    const onBulkShow = () => resetBulkForm();
+    addEl?.addEventListener("show.bs.modal", onAddShow as any);
+    bulkEl?.addEventListener("show.bs.modal", onBulkShow as any);
+    return () => {
+      addEl?.removeEventListener("show.bs.modal", onAddShow as any);
+      bulkEl?.removeEventListener("show.bs.modal", onBulkShow as any);
+    };
+  }, []);
+
+  const singleUserOptions =
+    singleUserType === "student"
+      ? students.filter((s: any) => s.id != null).map((s: any) => ({
+          value: String(s.id),
+          label: `${s.full_name || `${s.first_name || s.student_first_name || ""} ${s.last_name || s.student_last_name || ""}`.trim() || s.name || `Student ${s.id}`} (${s.admission_number || s.unique_student_ids || s.id})`,
+        }))
+      : staff.filter((s: any) => s.id != null).map((s: any) => ({
+          value: String(s.id),
+          label: `${[s.first_name, s.last_name].filter(Boolean).join(" ").trim() || s.name || `Staff ${s.id}`}${s.employee_code ? ` (${s.employee_code})` : ""}`,
+        }));
+
+  const filteredSingleFees = useMemo(
+    () => fees.filter((f: any) => {
+      if (!singlePickupPointId) return false;
+      return String(f.pickup_point_id || "") === String(singlePickupPointId) || !f.pickup_point_id;
+    }),
+    [fees, singlePickupPointId]
+  );
+  const filteredBulkFees = useMemo(
+    () => fees.filter((f: any) => {
+      if (!bulkPickupPointId) return false;
+      return String(f.pickup_point_id || "") === String(bulkPickupPointId) || !f.pickup_point_id;
+    }),
+    [fees, bulkPickupPointId]
+  );
+
+  const feeLabel = (fee: any, userType: string) =>
+    userType === "staff"
+      ? `${fee.plan_name} - Staff: ${fee.staff_amount ?? fee.amount}`
+      : `${fee.plan_name} - Student: ${fee.student_amount ?? fee.amount}`;
+
+  const saveSingleAllocation = async (e: any) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      if (!singleUserId || !singlePickupPointId || !singleVehicleRouteAssignmentId) {
+        throw new Error("Please select user, pickup point, and vehicle/route assignment");
+      }
+      if (!singleStartDate) {
+        throw new Error("Please select a start date");
+      }
+      if (!singleIsFree && !singleAssignedFeeId) {
+        throw new Error("Please select a fee plan");
+      }
+      const payload: any = {
+        user_type: singleUserType,
+        ...(singleUserType === "student"
+          ? { student_id: Number(singleUserId) }
+          : { staff_id: Number(singleUserId) }),
+        vehicle_route_assignment_id: Number(singleVehicleRouteAssignmentId),
+        pickup_point_id: Number(singlePickupPointId),
+        assigned_fee_id: singleIsFree ? null : (singleAssignedFeeId ? Number(singleAssignedFeeId) : null),
+        is_free: singleIsFree,
+        start_date: singleStartDate,
+        status: singleStatus,
+        academic_year_id: academicYearId ?? undefined,
+      };
+      const id = selectedAllocation?.originalData?.id;
+      const res = id
+        ? await apiService.updateTransportAllocation(id, payload)
+        : await apiService.createTransportAllocation(payload);
+      if (res?.status !== "SUCCESS") throw new Error(res?.message || "Failed to save allocation");
+      Swal.fire({
+        icon: "success",
+        title: "Success",
+        text: id ? "Allocation updated successfully" : "Allocation created successfully",
+        timer: 1500,
+        showConfirmButton: false,
+      });
+      hideModal(id ? "edit_transport_allocation" : "add_transport_allocation");
+      if (!id) resetSingleAddForm();
+      onSuccess?.();
+    } catch (err: any) {
+      Swal.fire({ icon: "error", title: "Error", text: toErrorText(err, "Failed to save allocation") });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const bulkUsersSource = bulkUserType === "student" ? students : staff;
+  const bulkClasses = Array.from(new Set(students.map((s: any) => s.class_name).filter(Boolean)));
+  const bulkSections = Array.from(
+    new Set(
+      students
+        .filter((s: any) => bulkClassFilter === "all" || String(s.class_name || "") === bulkClassFilter)
+        .map((s: any) => s.section_name || s.section)
+        .filter(Boolean)
+    )
+  );
+  const bulkDepartments = Array.from(new Set(staff.map((s: any) => s.department_name || s.department).filter(Boolean)));
+
+  const bulkFilteredUsers = useMemo(() => {
+    let rows = bulkUsersSource.filter((u: any) => u.id != null);
+    if (bulkSearch.trim()) {
+      const q = bulkSearch.trim().toLowerCase();
+      rows = rows.filter((u: any) =>
+        `${u.full_name || u.name || ""} ${u.first_name || u.student_first_name || ""} ${u.last_name || u.student_last_name || ""} ${u.admission_number || ""} ${u.employee_code || ""} ${u.department_name || u.department || ""}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    if (bulkUserType === "student" && bulkClassFilter !== "all") {
+      rows = rows.filter((u: any) => String(u.class_name || "") === bulkClassFilter);
+    }
+    if (bulkUserType === "student" && bulkSectionFilter !== "all") {
+      rows = rows.filter((u: any) => String(u.section_name || u.section || "") === bulkSectionFilter);
+    }
+    if (bulkUserType === "staff" && bulkDepartmentFilter !== "all") {
+      rows = rows.filter((u: any) => String(u.department_name || u.department || "") === bulkDepartmentFilter);
+    }
+    return rows;
+  }, [bulkUsersSource, bulkSearch, bulkUserType, bulkClassFilter, bulkSectionFilter, bulkDepartmentFilter]);
+
+  const saveBulkAllocation = async (e: any) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      if (!bulkPickupPointId || !bulkVehicleRouteAssignmentId) {
+        throw new Error("Please select pickup point and vehicle/route assignment");
+      }
+      if (!bulkStartDate) {
+        throw new Error("Please select a start date");
+      }
+      if (!bulkIsFree && !bulkAssignedFeeId) {
+        throw new Error("Please select a fee plan");
+      }
+      if (bulkSelectedUserIds.length === 0) {
+        throw new Error(`Please select at least one ${bulkUserType}`);
+      }
+      if (bulkSeatAvailability && bulkSelectedUserIds.length > bulkSeatAvailability.available) {
+        throw new Error(`Only ${bulkSeatAvailability.available} seat(s) available. Please select up to ${bulkSeatAvailability.available} ${bulkUserType}(s).`);
+      }
+
+      const payload = {
+        user_type: bulkUserType,
+        user_ids: bulkSelectedUserIds.map((id) => Number(id)),
+        vehicle_route_assignment_id: Number(bulkVehicleRouteAssignmentId),
+        pickup_point_id: Number(bulkPickupPointId),
+        assigned_fee_id: bulkIsFree ? null : (bulkAssignedFeeId ? Number(bulkAssignedFeeId) : null),
+        is_free: bulkIsFree,
+        start_date: bulkStartDate,
+        status: bulkStatus,
+        academic_year_id: academicYearId ?? undefined,
+      };
+      const bulkRes = await apiService.createTransportAllocationBulk(payload);
+      if (bulkRes?.status !== "SUCCESS") {
+        throw new Error(bulkRes?.message || "Failed to save bulk allocations");
+      }
+
+
+      Swal.fire({
+        icon: "success",
+        title: "Success",
+        text: `Created ${Number(bulkRes?.data?.createdCount || bulkSelectedUserIds.length)} allocations successfully.`,
+      });
+      hideModal("add_transport_allocation_bulk");
+      resetBulkForm();
+      onSuccess?.();
+    } catch (err: any) {
+      Swal.fire({ icon: "error", title: "Error", text: toErrorText(err, "Failed to save bulk allocations") });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteAllocation = async (e: any) => {
+    e.preventDefault();
+    if (!deleteId) return;
+    setLoading(true);
+    try {
+      const res = await apiService.deleteTransportAllocation(deleteId);
+      if (res?.status !== "SUCCESS") throw new Error(res?.message || "Failed to delete allocation");
+      Swal.fire({
+        icon: "success",
+        title: "Success",
+        text: "Allocation deleted successfully",
+        timer: 1500,
+        showConfirmButton: false,
+      });
+      hideModal("delete-transport-allocation-modal");
+      onSuccess?.();
+    } catch (err: any) {
+      Swal.fire({ icon: "error", title: "Error", text: toErrorText(err, "Failed to delete allocation") });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="modal fade" id="add_transport_allocation">
+        <div className="modal-dialog modal-dialog-centered modal-xl">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h4 className="modal-title">Add Transport Allocation</h4>
+              <button type="button" className="btn-close custom-btn-close" data-bs-dismiss="modal" aria-label="Close"><i className="ti ti-x" /></button>
+            </div>
+            <form onSubmit={saveSingleAllocation}>
+              <div className="modal-body">
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">User Type</label>
+                    <CommonSelect className="select" options={[{ value: "student", label: "Student" }, { value: "staff", label: "Staff" }]} value={singleUserType} onChange={(v: string | null) => { setSingleUserType(v || "student"); setSingleUserId(""); }} />
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">User</label>
+                    <CommonSelect className="select" options={singleUserOptions} value={singleUserId} onChange={(v: string | null) => setSingleUserId(v || "")} />
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Pickup Point</label>
+                    <CommonSelect
+                      className="select"
+                      options={pickupPoints.map((p: any) => ({ value: String(p.id), label: p.point_name }))}
+                      value={singlePickupPointId}
+                      onChange={(v: string | null) => {
+                        setSinglePickupPointId(v || "");
+                        setSingleAssignedFeeId("");
+                      }}
+                    />
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Vehicle &amp; route (assignment)</label>
+                    <CommonSelect
+                      className="select"
+                      options={singleAvailableAssignments.map((a: any) => ({
+                        value: String(a.id),
+                        label: `${a.route_name || "Route"} — ${a.vehicle_number || "?"}${a.driver_name ? ` (${a.driver_name})` : ""}`,
+                      }))}
+                      value={singleVehicleRouteAssignmentId}
+                      onChange={(v: string | null) => setSingleVehicleRouteAssignmentId(v || "")}
+                    />
+                    <small className="text-muted d-block mt-1">From vehicle–route assignments for this pickup and academic year.</small>
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Start Date</label>
+                    <DatePicker
+                      className="form-control datetimepicker"
+                      format="DD MMM YYYY"
+                      value={singleStartDate ? dayjs(singleStartDate) : null}
+                      onChange={(d) => setSingleStartDate(d ? d.format("YYYY-MM-DD") : "")}
+                    />
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-12 mb-3 d-flex align-items-end">
+                    <div className="form-check mb-2">
+                      <input className="form-check-input" type="checkbox" id="single_is_free_allocation" checked={singleIsFree} onChange={(e) => setSingleIsFree(e.target.checked)} />
+                      <label className="form-check-label" htmlFor="single_is_free_allocation">Is Free Allocation</label>
+                    </div>
+                  </div>
+                </div>
+                {!singleIsFree && (
+                  <div className="mb-3">
+                    <label className="form-label">Fee Plan</label>
+                    <CommonSelect className="select" options={filteredSingleFees.map((f: any) => ({ value: String(f.id), label: feeLabel(f, singleUserType) }))} value={singleAssignedFeeId} onChange={(v: string | null) => setSingleAssignedFeeId(v || "")} />
+                  </div>
+                )}
+                <div className="modal-status-toggle d-flex align-items-center justify-content-between mt-3 mx-2">
+                  <div className="status-title">
+                    <h5>Status</h5>
+                    <label className="form-label mb-0" htmlFor="single_allocation_status_toggle">{singleStatus}</label>
+                  </div>
+                  <div className="form-check form-switch">
+                    <input id="single_allocation_status_toggle" className="form-check-input" type="checkbox" checked={singleStatus === "Active"} onChange={(e) => setSingleStatus(e.target.checked ? "Active" : "Inactive")} />
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-light me-2" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={loading}>{loading ? "Saving..." : "Save"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div className="modal fade" id="edit_transport_allocation">
+        <div className="modal-dialog modal-dialog-centered modal-xl">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h4 className="modal-title">Edit Transport Allocation</h4>
+              <button type="button" className="btn-close custom-btn-close" data-bs-dismiss="modal" aria-label="Close"><i className="ti ti-x" /></button>
+            </div>
+            <form onSubmit={saveSingleAllocation}>
+              <div className="modal-body">{/* same fields as add */}
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">User Type</label>
+                    <CommonSelect className="select" options={[{ value: "student", label: "Student" }, { value: "staff", label: "Staff" }]} value={singleUserType} isDisabled={isEditMode} onChange={(v: string | null) => { setSingleUserType(v || "student"); setSingleUserId(""); }} />
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">User</label>
+                    <CommonSelect className="select" options={singleUserOptions} value={singleUserId} isDisabled={isEditMode} onChange={(v: string | null) => setSingleUserId(v || "")} />
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Pickup Point</label>
+                    <CommonSelect
+                      className="select"
+                      options={pickupPoints.map((p: any) => ({ value: String(p.id), label: p.point_name }))}
+                      value={singlePickupPointId}
+                      onChange={(v: string | null) => {
+                        setSinglePickupPointId(v || "");
+                        setSingleAssignedFeeId("");
+                      }}
+                    />
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Vehicle &amp; route (assignment)</label>
+                    <CommonSelect
+                      className="select"
+                      options={singleAvailableAssignments.map((a: any) => ({
+                        value: String(a.id),
+                        label: `${a.route_name || "Route"} — ${a.vehicle_number || "?"}${a.driver_name ? ` (${a.driver_name})` : ""}`,
+                      }))}
+                      value={singleVehicleRouteAssignmentId}
+                      onChange={(v: string | null) => setSingleVehicleRouteAssignmentId(v || "")}
+                    />
+                    <small className="text-muted d-block mt-1">From vehicle–route assignments for this pickup and academic year.</small>
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Start Date</label>
+                    <DatePicker
+                      className="form-control datetimepicker"
+                      format="DD MMM YYYY"
+                      value={singleStartDate ? dayjs(singleStartDate) : null}
+                      onChange={(d) => setSingleStartDate(d ? d.format("YYYY-MM-DD") : "")}
+                    />
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-12 mb-3 d-flex align-items-end">
+                    <div className="form-check mb-2">
+                      <input className="form-check-input" type="checkbox" id="edit_single_is_free_allocation" checked={singleIsFree} onChange={(e) => setSingleIsFree(e.target.checked)} />
+                      <label className="form-check-label" htmlFor="edit_single_is_free_allocation">Is Free Allocation</label>
+                    </div>
+                  </div>
+                </div>
+                {!singleIsFree && (
+                  <div className="mb-3">
+                    <label className="form-label">Fee Plan</label>
+                    <CommonSelect className="select" options={filteredSingleFees.map((f: any) => ({ value: String(f.id), label: feeLabel(f, singleUserType) }))} value={singleAssignedFeeId} onChange={(v: string | null) => setSingleAssignedFeeId(v || "")} />
+                  </div>
+                )}
+                <div className="modal-status-toggle d-flex align-items-center justify-content-between mt-3 mx-2">
+                  <div className="status-title">
+                    <h5>Status</h5>
+                    <label className="form-label mb-0" htmlFor="edit_single_allocation_status_toggle">{singleStatus}</label>
+                  </div>
+                  <div className="form-check form-switch">
+                    <input id="edit_single_allocation_status_toggle" className="form-check-input" type="checkbox" checked={singleStatus === "Active"} onChange={(e) => setSingleStatus(e.target.checked ? "Active" : "Inactive")} />
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-light me-2" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={loading}>{loading ? "Saving..." : "Save Changes"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div className="modal fade" id="add_transport_allocation_bulk">
+        <div className="modal-dialog modal-dialog-centered modal-xl">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h4 className="modal-title">Bulk Transport Allocation</h4>
+              <button type="button" className="btn-close custom-btn-close" data-bs-dismiss="modal" aria-label="Close"><i className="ti ti-x" /></button>
+            </div>
+            <form onSubmit={saveBulkAllocation}>
+              <div className="modal-body">
+                <div className="row">
+                  <div className="col-md-12 mb-3">
+                    <label className="form-label">User Type</label>
+                    <CommonSelect className="select" options={[{ value: "student", label: "Student" }, { value: "staff", label: "Staff" }]} value={bulkUserType} onChange={(v: string | null) => { setBulkUserType(v || "student"); setBulkSelectedUserIds([]); setBulkClassFilter("all"); setBulkSectionFilter("all"); setBulkDepartmentFilter("all"); }} />
+                  </div>
+                </div>
+
+                <div className="row">
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Pickup Point</label>
+                    <CommonSelect
+                      className="select"
+                      options={pickupPoints.map((p: any) => ({ value: String(p.id), label: p.point_name }))}
+                      value={bulkPickupPointId}
+                      onChange={(v: string | null) => {
+                        setBulkPickupPointId(v || "");
+                        setBulkAssignedFeeId("");
+                      }}
+                    />
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <label className="form-label">Vehicle &amp; route (assignment)</label>
+                    <CommonSelect
+                      className="select"
+                      options={bulkAvailableAssignments.map((a: any) => ({
+                        value: String(a.id),
+                        label: `${a.route_name || "Route"} — ${a.vehicle_number || "?"}${a.driver_name ? ` (${a.driver_name})` : ""}`,
+                      }))}
+                      value={bulkVehicleRouteAssignmentId}
+                      onChange={(v: string | null) => setBulkVehicleRouteAssignmentId(v || "")}
+                    />
+                    <small className="text-muted d-block mt-1">From vehicle–route assignments for this pickup and academic year.</small>
+                  </div>
+                </div>
+                <div className="row">
+                  <div className="col-md-12 mb-3">
+                    <label className="form-label">Start Date</label>
+                    <DatePicker
+                      className="form-control datetimepicker"
+                      format="DD MMM YYYY"
+                      value={bulkStartDate ? dayjs(bulkStartDate) : null}
+                      onChange={(d) => setBulkStartDate(d ? d.format("YYYY-MM-DD") : "")}
+                    />
+                  </div>
+                </div>
+                <div className="mb-3">
+                  <div className="form-check">
+                    <input className="form-check-input" type="checkbox" id="bulk_is_free" checked={bulkIsFree} onChange={(e) => setBulkIsFree(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="bulk_is_free">Is Free Allocation</label>
+                  </div>
+                </div>
+                {!bulkIsFree && (
+                  <div className="mb-3">
+                    <label className="form-label">Fee Plan</label>
+                    <CommonSelect className="select" options={filteredBulkFees.map((f: any) => ({ value: String(f.id), label: feeLabel(f, bulkUserType) }))} value={bulkAssignedFeeId} onChange={(v: string | null) => setBulkAssignedFeeId(v || "")} />
+                  </div>
+                )}
+
+                <div className="row">
+                  <div className={bulkUserType === "student" ? "col-md-4 mb-3" : "col-md-6 mb-3"}>
+                    <label className="form-label">Search User</label>
+                    <input className="form-control" value={bulkSearch} onChange={(e) => setBulkSearch(e.target.value)} placeholder="Search users..." />
+                  </div>
+                  {bulkUserType === "student" ? (
+                    <>
+                      <div className="col-md-4 mb-3">
+                        <label className="form-label">Class Filter</label>
+                        <CommonSelect className="select" options={[{ value: "all", label: "All Classes" }, ...bulkClasses.map((c: any) => ({ value: c, label: c }))]} value={bulkClassFilter} onChange={(v: string | null) => { setBulkClassFilter(v || "all"); setBulkSectionFilter("all"); }} />
+                      </div>
+                      <div className="col-md-4 mb-3">
+                        <label className="form-label">Section Filter</label>
+                        <CommonSelect className="select" options={[{ value: "all", label: "All Sections" }, ...bulkSections.map((s: any) => ({ value: s, label: s }))]} value={bulkSectionFilter} onChange={(v: string | null) => setBulkSectionFilter(v || "all")} />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="col-md-6 mb-3">
+                      <label className="form-label">Department Filter</label>
+                      <CommonSelect className="select" options={[{ value: "all", label: "All Departments" }, ...bulkDepartments.map((d: any) => ({ value: d, label: d }))]} value={bulkDepartmentFilter} onChange={(v: string | null) => setBulkDepartmentFilter(v || "all")} />
+                    </div>
+                  )}
+                </div>
+                {bulkSeatAvailability && (
+                  <div className="mb-3">
+                    <span className="badge bg-soft-info">
+                      Seats Available: {bulkSeatAvailability.available} / {bulkSeatAvailability.capacity}
+                    </span>
+                  </div>
+                )}
+
+                <div className="table-responsive border rounded" style={{ maxHeight: "250px", overflowY: "auto" }}>
+                  <table className="table mb-0">
+                    <thead className="thead-light">
+                      <tr>
+                        <th style={{ width: "50px" }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              bulkFilteredUsers.length > 0 &&
+                              bulkSelectedUserIds.length === Math.min(
+                                bulkFilteredUsers.length,
+                                Math.max(0, bulkSeatAvailability?.available ?? bulkFilteredUsers.length)
+                              )
+                            }
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                const maxSelectable = Math.max(0, bulkSeatAvailability?.available ?? bulkFilteredUsers.length);
+                                if (maxSelectable <= 0) {
+                                  Swal.fire({ icon: "warning", title: "No Seats Available", text: "No seats are available for this vehicle." });
+                                  return;
+                                }
+                                const nextIds = bulkFilteredUsers.slice(0, maxSelectable).map((u: any) => Number(u.id));
+                                setBulkSelectedUserIds(nextIds);
+                                if (bulkFilteredUsers.length > maxSelectable) {
+                                  Swal.fire({
+                                    icon: "warning",
+                                    title: "Seat Limit",
+                                    text: `Only ${maxSelectable} seat(s) are available. You can select up to ${maxSelectable} user(s).`,
+                                  });
+                                }
+                              } else {
+                                setBulkSelectedUserIds([]);
+                              }
+                            }}
+                          />
+                        </th>
+                        <th>Name</th>
+                        <th>{bulkUserType === "student" ? "Admission No" : "Employee Code"}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bulkFilteredUsers.map((u: any) => {
+                        const uid = Number(u.id);
+                        const checked = bulkSelectedUserIds.includes(uid);
+                        return (
+                          <tr key={uid}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={!checked && (bulkSeatAvailability?.available ?? Number.MAX_SAFE_INTEGER) <= bulkSelectedUserIds.length}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    const maxSelectable = Math.max(0, bulkSeatAvailability?.available ?? Number.MAX_SAFE_INTEGER);
+                                    if (bulkSelectedUserIds.length >= maxSelectable) {
+                                      Swal.fire({
+                                        icon: "warning",
+                                        title: "Seat Limit Reached",
+                                        text: `Only ${maxSelectable} seat(s) are available. Please deselect one user to select another.`,
+                                      });
+                                      return;
+                                    }
+                                    setBulkSelectedUserIds((prev) => [...prev, uid]);
+                                  } else {
+                                    setBulkSelectedUserIds((prev) => prev.filter((id) => id !== uid));
+                                  }
+                                }}
+                              />
+                            </td>
+                            <td>{`${u.full_name || u.name || `${u.first_name || u.student_first_name || ""} ${u.last_name || u.student_last_name || ""}`.trim()}`.trim() || "N/A"}</td>
+                            <td>{bulkUserType === "student" ? (u.admission_number || u.unique_student_ids || "-") : (u.employee_code || "-")}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-2">
+                  <span className="badge bg-soft-primary">{bulkSelectedUserIds.length} users selected</span>
+                </div>
+
+                <div className="modal-status-toggle d-flex align-items-center justify-content-between mt-3 mx-2">
+                  <div className="status-title">
+                    <h5>Status</h5>
+                    <label className="form-label mb-0" htmlFor="bulk_status_toggle">{bulkStatus}</label>
+                  </div>
+                  <div className="form-check form-switch">
+                    <input id="bulk_status_toggle" className="form-check-input" type="checkbox" checked={bulkStatus === "Active"} onChange={(e) => setBulkStatus(e.target.checked ? "Active" : "Inactive")} />
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-light me-2" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={loading}>{loading ? "Saving..." : "Allocate Selected Users"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div className="modal fade" id="delete-transport-allocation-modal">
+        <div className="modal-dialog modal-dialog-centered">
+          <div className="modal-content">
+            <div className="modal-body text-center">
+              <span className="delete-icon"><i className="ti ti-trash-x" /></span>
+              <h4>Delete Allocation</h4>
+              <p>This will permanently delete the allocation record.</p>
+              <div className="d-flex justify-content-center">
+                <Link to="#" className="btn btn-light me-3" data-bs-dismiss="modal">Cancel</Link>
+                <Link to="#" className="btn btn-danger" onClick={deleteAllocation}>{loading ? "Deleting..." : "Yes, Delete"}</Link>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+export default TransportAllocationModal;

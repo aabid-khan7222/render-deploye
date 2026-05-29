@@ -1,0 +1,939 @@
+const { query, masterQuery, runWithTenant, executeTransaction } = require('../config/database');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const serverConfig = require('../config/server');
+const { success, error: errorResponse } = require('../utils/responseHelper');
+const crypto = require('crypto');
+const { secureCookieBase } = require('../utils/cookiePolicy');
+const { getSchoolProfile } = require('../services/schoolProfileService');
+const { ROLE_NAMES } = require('../config/roles');
+const { parseRelativeKey } = require('../storage/LocalFilesystemStorageProvider');
+const { getSchoolIdFromRequest } = require('../utils/schoolContext');
+const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
+const {
+  issueTenantSessionForUser,
+  refreshTenantJwtCookie,
+} = require('../services/tenantSessionIssueService');
+const { getEffectiveSchoolModules } = require('../services/saasSchoolModulesService');
+
+function displayRoleFromRoleRow(user) {
+  const rn = (user?.role_name || '').toString().trim();
+  if (rn) return rn;
+  const rid = parseInt(String(user?.role_id ?? ''), 10);
+  if (Number.isFinite(rid) && ROLE_NAMES[rid]) return ROLE_NAMES[rid];
+  return 'User';
+}
+
+const AUTH_COOKIE_NAME = 'auth_token';
+const SESSION_COOKIE_NAME = 'sid';
+const LOGIN_DEBUG_ENABLED =
+  process.env.NODE_ENV !== 'production' &&
+  String(process.env.LOGIN_DEBUG || 'true').toLowerCase() !== 'false';
+
+function logLoginDebug(stage, meta = {}) {
+  if (!LOGIN_DEBUG_ENABLED) return;
+  try {
+    console.log('[auth:login:debug]', { stage, ...meta });
+  } catch {
+    // no-op
+  }
+}
+
+/** Cookie options for HTTP-only auth cookie. SameSite=None for cross-origin (e.g. Render frontend/backend). */
+const getAuthCookieOptions = () => {
+  const { sameSite, secure } = secureCookieBase();
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+  return {
+    httpOnly: true,
+    secure,
+    sameSite,
+    maxAge: maxAgeMs,
+    path: '/',
+  };
+};
+
+const getSessionCookieOptions = () => {
+  const { sameSite, secure } = secureCookieBase();
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+  return {
+    httpOnly: true,
+    secure,
+    sameSite,
+    maxAge: maxAgeMs,
+    path: '/',
+  };
+};
+
+// Double-submit CSRF cookie (readable by JS; paired with X-XSRF-TOKEN header)
+const getCsrfCookieOptions = () => {
+  const { sameSite, secure } = secureCookieBase();
+  return {
+    httpOnly: false,
+    secure,
+    sameSite,
+    path: '/',
+  };
+};
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+
+const GENERIC_LOGIN_FAIL = 'Invalid credentials';
+
+function looksLikeBcryptHash(value) {
+  const s = String(value || '');
+  return /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(s);
+}
+
+/**
+ * Login - authenticate user with username/phone and password (bcrypt password_hash).
+ * Lookup by username, email, or phone. Same error message for all auth failures (no user/institute enumeration).
+ */
+const login = async (req, res) => {
+  try {
+    const { username, password, instituteNumber, institute_number } = req.body;
+
+    const institute = (instituteNumber || institute_number || '').toString().trim();
+    if (!institute) {
+      logLoginDebug('missing_institute', {
+        hasUsername: !!username,
+        identifierLength: String(username || '').length,
+      });
+      return errorResponse(res, 400, 'Institute number is required');
+    }
+
+    // Resolve school and target DB from master_db (ignore soft-deleted schools)
+    let school;
+    try {
+      const schoolRes = await masterQuery(
+        `SELECT id, school_name, type, logo, institute_number, db_name, status, deleted_at
+         FROM schools
+         WHERE institute_number = $1 AND deleted_at IS NULL
+         LIMIT 1`,
+        [institute]
+      );
+      if (schoolRes.rows.length === 0) {
+        logLoginDebug('institute_not_found', {
+          institute,
+          identifier: String(username || '').trim(),
+        });
+        return errorResponse(res, 401, GENERIC_LOGIN_FAIL);
+      }
+      const s = schoolRes.rows[0];
+      if (s.deleted_at || (s.status && String(s.status).toLowerCase() === 'disabled')) {
+        logLoginDebug('school_disabled_or_deleted', {
+          institute,
+          status: s.status,
+          deleted: !!s.deleted_at,
+        });
+        return errorResponse(res, 401, GENERIC_LOGIN_FAIL);
+      }
+      school = s;
+    } catch (e) {
+      console.error('Error querying master_db.schools:', e);
+      return errorResponse(res, 500, 'Login failed');
+    }
+
+    const targetDbName = school.db_name;
+
+    if (!username || !password) {
+      logLoginDebug('missing_username_or_password', {
+        institute,
+        hasUsername: !!username,
+        hasPassword: !!password,
+      });
+      return errorResponse(res, 400, 'Username and password are required');
+    }
+
+    if (!serverConfig.jwtUserSecret) {
+      return errorResponse(res, 500, 'Server configuration error');
+    }
+
+    const identifier = username.trim().toString();
+    const identifierDigits = identifier.replace(/\D/g, '');
+    const enteredPassword = (password || '').toString().trim();
+
+    await runWithTenant(targetDbName, async () => {
+      let userRows = [];
+      try {
+        const userResult = await query(
+          `SELECT u.id, u.username, u.first_name, u.last_name, u.role_id,
+                  u.phone, u.password_hash,
+                  ur.role_name,
+                  st.id as staff_id, u.first_name as staff_first_name, u.last_name as staff_last_name,
+                  CASE
+                    WHEN LOWER(COALESCE(u.username, '')) = LOWER($1) THEN 1
+                    WHEN LOWER(COALESCE(u.email, '')) = LOWER($1) THEN 2
+                    WHEN $2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2 THEN 3
+                    WHEN u.phone = $1 THEN 4
+                    ELSE 9
+                  END AS match_rank,
+                  CASE
+                    WHEN LOWER(COALESCE(u.username, '')) = LOWER($1) THEN 'username'
+                    WHEN LOWER(COALESCE(u.email, '')) = LOWER($1) THEN 'email'
+                    WHEN $2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2 THEN 'phone'
+                    WHEN u.phone = $1 THEN 'phone'
+                    ELSE 'other'
+                  END AS match_kind
+           FROM users u
+           LEFT JOIN user_roles ur ON u.role_id = ur.id
+           LEFT JOIN staff st ON u.id = st.user_id AND (st.deleted_at IS NULL AND LOWER(st.status) = 'active')
+           WHERE u.is_active = true AND u.deleted_at IS NULL
+            AND (
+              LOWER(COALESCE(u.username, '')) = LOWER($1)
+              OR LOWER(COALESCE(u.email, '')) = LOWER($1)
+              OR u.phone = $1
+              OR ($2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2)
+            )
+           ORDER BY match_rank ASC, u.id ASC`,
+          [identifier, identifierDigits]
+        );
+        userRows = userResult.rows || [];
+      } catch (e) {
+        if (e.message && (e.message.includes('email') || e.message.includes('password_hash'))) {
+          const userResult = await query(
+            `SELECT u.id, u.username, u.first_name, u.last_name, u.role_id,
+                    u.phone, u.password_hash,
+                    ur.role_name,
+                    st.id as staff_id, u.first_name as staff_first_name, u.last_name as staff_last_name,
+                    CASE
+                      WHEN LOWER(COALESCE(u.username, '')) = LOWER($1) THEN 1
+                      WHEN $2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2 THEN 2
+                      WHEN u.phone = $1 THEN 3
+                      ELSE 9
+                    END AS match_rank,
+                    CASE
+                      WHEN LOWER(COALESCE(u.username, '')) = LOWER($1) THEN 'username'
+                      WHEN $2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2 THEN 'phone'
+                      WHEN u.phone = $1 THEN 'phone'
+                      ELSE 'other'
+                    END AS match_kind
+             FROM users u
+             LEFT JOIN user_roles ur ON u.role_id = ur.id
+             LEFT JOIN staff st ON u.id = st.user_id AND (st.deleted_at IS NULL AND LOWER(st.status) = 'active')
+             WHERE u.is_active = true AND u.deleted_at IS NULL
+               AND (
+                 LOWER(COALESCE(u.username, '')) = LOWER($1)
+                 OR u.phone = $1
+                 OR ($2 <> '' AND regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g') = $2)
+               )
+             ORDER BY match_rank ASC, u.id ASC`,
+            [identifier, identifierDigits]
+          );
+          userRows = userResult.rows || [];
+        } else {
+          throw e;
+        }
+      }
+
+      if (userRows.length === 0) {
+        logLoginDebug('user_not_found_for_identifier', {
+          institute,
+          db: targetDbName,
+          identifier,
+        });
+        return errorResponse(res, 401, GENERIC_LOGIN_FAIL);
+      }
+
+      // Safety: identifier must resolve uniquely before password validation for phone/email paths.
+      const bestRank = Number(userRows[0]?.match_rank || 9);
+      const topRankUsers = userRows.filter((row) => Number(row.match_rank) === bestRank);
+      const bestKind = String(topRankUsers[0]?.match_kind || '');
+      if ((bestKind === 'phone' || bestKind === 'email') && topRankUsers.length > 1) {
+        logLoginDebug('ambiguous_identifier', {
+          institute,
+          db: targetDbName,
+          identifier,
+          matchKind: bestKind,
+          count: topRankUsers.length,
+        });
+        return errorResponse(
+          res,
+          409,
+          'This phone/email is linked to multiple accounts. Please login using username.'
+        );
+      }
+      const candidateUsers = topRankUsers.length > 0 ? topRankUsers : userRows;
+
+      const passwordMatchedUsers = [];
+      for (const candidate of candidateUsers) {
+        const passwordHash = candidate.password_hash;
+        if (!passwordHash) continue;
+        let ok = false;
+        let needsRehash = false;
+        try {
+          ok = await bcrypt.compare(enteredPassword, passwordHash);
+        } catch {
+          ok = false;
+        }
+        // Compatibility path: some manually inserted dummy rows may contain plaintext
+        // in password_hash. Accept only exact match once, then upgrade immediately.
+        if (!ok && !looksLikeBcryptHash(passwordHash) && passwordHash === enteredPassword) {
+          ok = true;
+          needsRehash = true;
+        }
+        if (ok && needsRehash) {
+          try {
+            const upgradedHash = await bcrypt.hash(enteredPassword, 12);
+            await query(
+              `UPDATE users
+               SET password_hash = $1, updated_at = NOW()
+               WHERE id = $2 AND is_active = true AND deleted_at IS NULL`,
+              [upgradedHash, candidate.id]
+            );
+          } catch (rehashErr) {
+            console.error('Login password rehash failed:', rehashErr);
+            // Fail closed if we cannot upgrade insecure stored password.
+            return errorResponse(res, 500, 'Login failed');
+          }
+        }
+        if (ok) passwordMatchedUsers.push(candidate);
+      }
+
+      if (passwordMatchedUsers.length === 0) {
+        logLoginDebug('password_mismatch', {
+          institute,
+          db: targetDbName,
+          identifier,
+          candidateCount: candidateUsers.length,
+        });
+        return errorResponse(res, 401, GENERIC_LOGIN_FAIL);
+      }
+      if (passwordMatchedUsers.length > 1) {
+        logLoginDebug('multiple_password_matches', {
+          institute,
+          db: targetDbName,
+          identifier,
+          count: passwordMatchedUsers.length,
+        });
+        // Prevent accidental cross-account login when identifier (mostly phone) is shared.
+        return errorResponse(
+          res,
+          409,
+          'Multiple accounts match these credentials. Please login using your unique username.'
+        );
+      }
+      const user = passwordMatchedUsers[0];
+      logLoginDebug('login_success', {
+        institute,
+        db: targetDbName,
+        identifier,
+        userId: user.id,
+      });
+
+      let accountDisabled = false;
+      try {
+        const accCheck = await query(
+          `SELECT s.id AS student_id, (s.status = 'Active') AS student_is_active, st.id AS staff_id, (st.deleted_at IS NULL AND LOWER(st.status) = 'active') AS staff_is_active
+            FROM users u
+            LEFT JOIN students s ON u.id = s.user_id
+            LEFT JOIN staff st ON u.id = st.user_id
+            WHERE u.id = $1`,
+          [user.id]
+        );
+        if (accCheck.rows.length > 0) {
+          const r = accCheck.rows[0];
+          const sid = r.student_id;
+          const sActive = r.student_is_active;
+          const tid = r.staff_id;
+          const tActive = r.staff_is_active;
+          const studentInactive = sid != null && (sActive === false || sActive === 'f' || sActive === 0);
+          const staffInactive = tid != null && (tActive === false || tActive === 'f' || tActive === 0);
+          accountDisabled = !!studentInactive || !!staffInactive;
+        }
+      } catch {
+        // ignore; accountDisabled stays false
+      }
+
+      let responseData;
+      try {
+        responseData = await issueTenantSessionForUser(req, res, {
+          school,
+          user,
+          targetDbName,
+          accountDisabled,
+        });
+      } catch (e) {
+        console.error('Failed to issue tenant session:', e);
+        return errorResponse(res, 500, 'Login failed');
+      }
+      success(res, 200, 'Login successful', responseData);
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    errorResponse(res, 500, 'Login failed');
+  }
+};
+
+/**
+ * Get current user from token - returns full user details from DB (like getUserById)
+ * so students/parents can get their profile without needing Admin permission
+ */
+    const getMe = async (req, res) => {
+  try {
+    const tokenUser = req.user;
+    if (!tokenUser || !tokenUser.id) {
+      return errorResponse(res, 401, 'Not authenticated');
+    }
+    // Ensure CSRF cookie exists for SPA after session restoration.
+    if (!req.cookies?.['XSRF-TOKEN']) {
+      const csrfToken = crypto.randomBytes(16).toString('base64url');
+      res.cookie('XSRF-TOKEN', csrfToken, getCsrfCookieOptions());
+    }
+    const result = await query(
+      `SELECT 
+        u.*,
+        s.id AS student_id,
+        u.first_name AS student_first_name,
+        u.last_name AS student_last_name,
+        (s.status = 'Active') AS student_is_active,
+        c.class_name,
+        sec.section_name,
+        st.id AS staff_id,
+        u.first_name AS staff_first_name,
+        u.last_name AS staff_last_name,
+        (st.deleted_at IS NULL AND LOWER(st.status) = 'active') AS staff_is_active,
+        d.designation_name,
+        ur.role_name
+      FROM users u
+      LEFT JOIN students s ON u.id = s.user_id
+      ${lateralCurrentEnrollment('s.id')}
+      LEFT JOIN classes c ON enr.class_id = c.id
+      LEFT JOIN sections sec ON enr.section_id = sec.id
+      LEFT JOIN staff st ON u.id = st.user_id
+      LEFT JOIN designations d ON st.designation_id = d.id
+      LEFT JOIN user_roles ur ON u.role_id = ur.id
+      WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL`,
+      [tokenUser.id]
+    );
+    if (result.rows.length === 0) {
+      return errorResponse(res, 404, 'User not found');
+    }
+    const user = result.rows[0];
+    // Never expose password hashes or internal auth fields to clients.
+    if (user && Object.prototype.hasOwnProperty.call(user, 'password_hash')) {
+      delete user.password_hash;
+    }
+
+    const dbRoleId = parseInt(String(user.role_id ?? ''), 10);
+    const tokenRoleId = parseInt(String(tokenUser.role_id ?? ''), 10);
+    const dbRoleName = String(user.role_name || '').trim().toLowerCase();
+    const tokenRoleName = String(tokenUser.role_name || tokenUser.role || '').trim().toLowerCase();
+    const roleIdChanged =
+      Number.isFinite(dbRoleId) &&
+      Number.isFinite(tokenRoleId) &&
+      dbRoleId > 0 &&
+      tokenRoleId > 0 &&
+      dbRoleId !== tokenRoleId;
+    const roleNameChanged = dbRoleName !== '' && tokenRoleName !== '' && dbRoleName !== tokenRoleName;
+    if ((roleIdChanged || roleNameChanged) && tokenUser.school_id != null) {
+      const targetDbName = req.tenant?.db_name || tokenUser.db_name;
+      if (targetDbName) {
+        refreshTenantJwtCookie(req, res, {
+          school: {
+            id: tokenUser.school_id,
+            school_name: tokenUser.school_name,
+            type: tokenUser.school_type,
+            institute_number: tokenUser.institute_number,
+            logo: tokenUser.school_logo || null,
+          },
+          user: {
+            id: user.id,
+            username: user.username,
+            role_id: user.role_id,
+            role_name: user.role_name,
+          },
+          targetDbName,
+        });
+        tokenUser.role_id = user.role_id;
+        tokenUser.role_name = user.role_name;
+        req.user = tokenUser;
+      }
+    }
+    const hasStudent = user.student_id != null;
+    const hasStaff = user.staff_id != null;
+    const studentInactive = hasStudent && (user.student_is_active === false || user.student_is_active === 'f' || user.student_is_active === 0);
+    const staffInactive = hasStaff && (user.staff_is_active === false || user.staff_is_active === 'f' || user.staff_is_active === 0);
+    const accountDisabled = !!studentInactive || !!staffInactive;
+
+    let displayName = '';
+    let displayRole = '';
+    if (user.student_first_name || user.student_last_name) {
+      displayName = `${user.student_first_name || ''} ${user.student_last_name || ''}`.trim();
+      displayRole = displayRoleFromRoleRow(user) || 'Student';
+    } else if (user.staff_first_name || user.staff_last_name) {
+      displayName = `${user.staff_first_name || ''} ${user.staff_last_name || ''}`.trim();
+      displayRole = user.designation_name || displayRoleFromRoleRow(user) || 'Teacher';
+    } else {
+      displayName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.username || 'User';
+      displayRole = displayRoleFromRoleRow(user);
+    }
+    let schoolLogo = tokenUser.school_logo != null ? tokenUser.school_logo : null;
+    if (tokenUser.school_id != null) {
+      try {
+        const logoRes = await masterQuery(
+          `SELECT logo FROM schools WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+          [tokenUser.school_id]
+        );
+        if (logoRes.rows?.[0] && Object.prototype.hasOwnProperty.call(logoRes.rows[0], 'logo')) {
+          schoolLogo = logoRes.rows[0].logo;
+        }
+      } catch (e) {
+        console.warn('getMe: could not load school logo from master_db:', e.message);
+      }
+    }
+    if (!String(schoolLogo || '').trim()) {
+      try {
+        const profile = await getSchoolProfile(tokenUser.school_name || null);
+        const profileLogo = String(profile?.logo_url || '').trim();
+        if (profileLogo) {
+          schoolLogo = profileLogo;
+        }
+      } catch (e) {
+        console.warn('getMe: could not load school logo from school_profile:', e.message);
+      }
+    }
+
+    let schoolName = tokenUser.school_name || null;
+    if (tokenUser.school_id != null) {
+      try {
+        const nameRes = await masterQuery(
+          `SELECT school_name FROM schools WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+          [tokenUser.school_id]
+        );
+        const masterName = String(nameRes.rows?.[0]?.school_name || '').trim();
+        if (masterName) {
+          schoolName = masterName;
+        }
+      } catch (e) {
+        console.warn('getMe: could not load school name from master_db:', e.message);
+      }
+    }
+    try {
+      const profile = await getSchoolProfile(tokenUser.school_name || null);
+      const profileName = String(profile?.school_name || '').trim();
+      if (profileName) {
+        schoolName = profileName;
+      }
+    } catch (e) {
+      console.warn('getMe: could not load school name from school_profile:', e.message);
+    }
+
+    const userData = {
+      ...user,
+      display_name: displayName,
+      display_role: displayRole,
+      account_disabled: accountDisabled,
+      school_name: schoolName,
+      school_type: tokenUser.school_type,
+      school_logo: schoolLogo,
+      institute_number: tokenUser.institute_number,
+    };
+    if (tokenUser.school_id != null) {
+      try {
+        const eff = await getEffectiveSchoolModules(tokenUser.school_id);
+        userData.saas_modules = eff.modules;
+      } catch (e) {
+        console.warn('getMe: saas_modules unavailable:', e.message);
+      }
+    }
+    success(res, 200, 'User fetched', userData);
+  } catch (err) {
+    console.error('GetMe error:', err);
+    errorResponse(res, 500, 'Failed to fetch user');
+  }
+};
+
+/**
+ * Logout - clear HTTP-only auth cookie
+ */
+const logout = (req, res) => {
+  // Bearer sessions: revoke all active DB rows for this user+school (stateless JWT has no single sid).
+  if (serverConfig.tenantBearerAuthInProduction) {
+    const authz = req.headers.authorization || '';
+    if (authz.startsWith('Bearer ')) {
+      try {
+        const raw = authz.slice(7).trim();
+        const dec = jwt.verify(raw, serverConfig.jwtUserSecret);
+        if (dec?.id != null && dec?.school_id != null) {
+          masterQuery(
+            `UPDATE tenant_sessions SET revoked_at = NOW()
+             WHERE tenant_user_id = $1 AND school_id = $2 AND revoked_at IS NULL`,
+            [dec.id, dec.school_id]
+          ).catch(() => {});
+        }
+      } catch (_) {
+        /* ignore invalid bearer on logout */
+      }
+    }
+  }
+  // Best-effort server-side session revocation (cookie flow).
+  const sid = req.cookies?.[SESSION_COOKIE_NAME] || null;
+  if (sid) {
+    const sessionHash = sha256Hex(sid);
+    masterQuery(
+      `UPDATE tenant_sessions SET revoked_at = NOW() WHERE session_hash = $1 AND revoked_at IS NULL`,
+      [sessionHash]
+    ).catch(() => {});
+  }
+  const opts = getAuthCookieOptions();
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: opts.httpOnly,
+    secure: opts.secure,
+    sameSite: opts.sameSite,
+    path: opts.path,
+  });
+  const sopts = getSessionCookieOptions();
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: sopts.httpOnly,
+    secure: sopts.secure,
+    sameSite: sopts.sameSite,
+    path: sopts.path,
+  });
+  success(res, 200, 'Logged out successfully', null);
+};
+
+async function getTableColumns(client, tableName) {
+  const r = await client.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = $1
+    `,
+    [tableName]
+  );
+  return new Set((r.rows || []).map((x) => String(x.column_name)));
+}
+
+function normalizeMyAvatarPath(rawAvatar, schoolId) {
+  // Some tenant schemas keep users.avatar as NOT NULL; use empty string as "no avatar".
+  if (rawAvatar == null) return '';
+  const v = String(rawAvatar).trim();
+  if (!v) return '';
+
+  let relative = v.replace(/\\/g, '/');
+  const storageUrlPrefix = '/api/storage/files/';
+  if (relative.startsWith(storageUrlPrefix)) {
+    relative = relative.slice(storageUrlPrefix.length);
+  }
+  const parsed = parseRelativeKey(relative);
+  if (!parsed) return null;
+  if (Number(parsed.schoolId) !== Number(schoolId)) return null;
+  if (!String(parsed.folder || '').startsWith('users/')) return null;
+  return relative;
+}
+
+/**
+ * Update current user's own profile (and latest address).
+ * - No schema changes
+ * - Updates only columns that exist in this tenant DB
+ * - If linked student/staff exists, updates their first/last name too
+ */
+const updateMe = async (req, res) => {
+  try {
+    const tokenUser = req.user;
+    if (!tokenUser || !tokenUser.id) {
+      return errorResponse(res, 401, 'Not authenticated');
+    }
+
+    const userId = parseInt(tokenUser.id, 10);
+    const {
+      first_name,
+      last_name,
+      email,
+      phone,
+      current_address,
+      permanent_address,
+      avatar,
+    } = req.body || {};
+    const schoolId = getSchoolIdFromRequest(req);
+    const hasAvatarInPayload = Object.prototype.hasOwnProperty.call(req.body || {}, 'avatar');
+    const normalizedAvatar = hasAvatarInPayload
+      ? normalizeMyAvatarPath(avatar, schoolId)
+      : undefined;
+    if (hasAvatarInPayload && avatar != null && String(avatar).trim() !== '' && !normalizedAvatar) {
+      return errorResponse(res, 400, 'Invalid avatar path');
+    }
+
+    const resultUser = await executeTransaction(async (client) => {
+      const userCols = await getTableColumns(client, 'users');
+      const studentCols = await getTableColumns(client, 'students');
+      const staffCols = await getTableColumns(client, 'staff');
+
+      // Load current user and linkage
+      const base = await client.query(
+        `
+        SELECT
+          u.id,
+          u.role_id,
+          s.id AS student_id,
+          st.id AS staff_id
+        FROM users u
+        LEFT JOIN students s ON u.id = s.user_id
+        LEFT JOIN staff st ON u.id = st.user_id
+        WHERE u.id = $1 AND u.is_active = true
+        LIMIT 1
+        `,
+        [userId]
+      );
+      if (!base.rows || base.rows.length === 0) {
+        return null;
+      }
+      const link = base.rows[0];
+
+      // Update users table fields (only if columns exist)
+      const userUpdates = [];
+      const userParams = [];
+      const pushUser = (col, val) => {
+        userUpdates.push(`${col} = $${userParams.length + 1}`);
+        userParams.push(val);
+      };
+
+      if (userCols.has('first_name') && first_name !== undefined) pushUser('first_name', first_name || null);
+      if (userCols.has('last_name') && last_name !== undefined) pushUser('last_name', last_name || null);
+      if (userCols.has('email') && email !== undefined) pushUser('email', email || null);
+      if (userCols.has('phone') && phone !== undefined) pushUser('phone', phone || null);
+      if (userCols.has('current_address') && current_address !== undefined) {
+        pushUser('current_address', current_address || null);
+      }
+      if (userCols.has('permanent_address') && permanent_address !== undefined) {
+        pushUser('permanent_address', permanent_address || null);
+      }
+      if (userCols.has('avatar') && normalizedAvatar !== undefined) {
+        pushUser('avatar', normalizedAvatar);
+      }
+
+      if (userUpdates.length > 0) {
+        userParams.push(userId);
+        await client.query(
+          `UPDATE users SET ${userUpdates.join(', ')} WHERE id = $${userParams.length} AND is_active = true`,
+          userParams
+        );
+      }
+
+      // If this user is a student/staff, keep their person-name in sync when requested
+      const hasNameUpdate = first_name !== undefined || last_name !== undefined;
+      if (hasNameUpdate && link.student_id != null && studentCols.has('first_name') && studentCols.has('last_name')) {
+        const sFirst = first_name !== undefined ? (first_name || null) : undefined;
+        const sLast = last_name !== undefined ? (last_name || null) : undefined;
+        const sUpdates = [];
+        const sParams = [];
+        if (sFirst !== undefined) { sUpdates.push(`first_name = $${sParams.length + 1}`); sParams.push(sFirst); }
+        if (sLast !== undefined) { sUpdates.push(`last_name = $${sParams.length + 1}`); sParams.push(sLast); }
+        if (sUpdates.length > 0) {
+          sParams.push(userId);
+          await client.query(
+            `UPDATE students SET ${sUpdates.join(', ')} WHERE user_id = $${sParams.length}`,
+            sParams
+          );
+        }
+      }
+
+      if (hasNameUpdate && link.staff_id != null && staffCols.has('first_name') && staffCols.has('last_name')) {
+        const tFirst = first_name !== undefined ? (first_name || null) : undefined;
+        const tLast = last_name !== undefined ? (last_name || null) : undefined;
+        const tUpdates = [];
+        const tParams = [];
+        if (tFirst !== undefined) { tUpdates.push(`first_name = $${tParams.length + 1}`); tParams.push(tFirst); }
+        if (tLast !== undefined) { tUpdates.push(`last_name = $${tParams.length + 1}`); tParams.push(tLast); }
+        if (tUpdates.length > 0) {
+          tParams.push(userId);
+          await client.query(
+            `UPDATE staff SET ${tUpdates.join(', ')} WHERE user_id = $${tParams.length}`,
+            tParams
+          );
+        }
+      }
+
+      // Address: update latest row if exists, else insert a new one.
+      // Return fresh /auth/me-like payload by calling getMe-like query (but within same client)
+      let me;
+      try {
+        me = await client.query(
+          `SELECT 
+            u.*,
+            s.id AS student_id,
+            u.first_name AS student_first_name,
+            u.last_name AS student_last_name,
+            (s.status = 'Active') AS student_is_active,
+            c.class_name,
+            sec.section_name,
+            st.id AS staff_id,
+            u.first_name AS staff_first_name,
+            u.last_name AS staff_last_name,
+            (st.deleted_at IS NULL AND st.status = 'Active') AS staff_is_active,
+            d.designation_name,
+            ur.role_name,
+            addr.address_id,
+            addr.current_address,
+            addr.permanent_address
+          FROM users u
+          LEFT JOIN students s ON u.id = s.user_id
+          ${lateralCurrentEnrollment('s.id')}
+          LEFT JOIN classes c ON enr.class_id = c.id
+          LEFT JOIN sections sec ON enr.section_id = sec.id
+          LEFT JOIN staff st ON u.id = st.user_id
+          LEFT JOIN designations d ON st.designation_id = d.id
+          LEFT JOIN user_roles ur ON u.role_id = ur.id
+          LEFT JOIN LATERAL (
+            SELECT id AS address_id, current_address, permanent_address
+            FROM addresses
+            WHERE user_id = u.id
+            ORDER BY id DESC
+            LIMIT 1
+          ) addr ON true
+          WHERE u.id = $1 AND u.is_active = true`,
+          [userId]
+        );
+      } catch (e) {
+        me = await client.query(
+          `SELECT 
+            u.*,
+            s.id AS student_id,
+            u.first_name AS student_first_name,
+            u.last_name AS student_last_name,
+            (s.status = 'Active') AS student_is_active,
+            c.class_name,
+            sec.section_name,
+            st.id AS staff_id,
+            u.first_name AS staff_first_name,
+            u.last_name AS staff_last_name,
+            (st.deleted_at IS NULL AND LOWER(st.status) = 'active') AS staff_is_active,
+            d.designation_name,
+            ur.role_name
+          FROM users u
+          LEFT JOIN students s ON u.id = s.user_id
+          ${lateralCurrentEnrollment('s.id')}
+          LEFT JOIN classes c ON enr.class_id = c.id
+          LEFT JOIN sections sec ON enr.section_id = sec.id
+          LEFT JOIN staff st ON u.id = st.user_id
+          LEFT JOIN designations d ON st.designation_id = d.id
+          LEFT JOIN user_roles ur ON u.role_id = ur.id
+          WHERE u.id = $1 AND u.is_active = true`,
+          [userId]
+        );
+      }
+      return me.rows[0] || null;
+    });
+
+    if (!resultUser) {
+      return errorResponse(res, 404, 'User not found');
+    }
+
+    // Compute display fields same as getMe
+    const user = resultUser;
+    // Never expose password hashes or internal auth fields to clients.
+    if (user && Object.prototype.hasOwnProperty.call(user, 'password_hash')) {
+      delete user.password_hash;
+    }
+    const hasStudent = user.student_id != null;
+    const hasStaff = user.staff_id != null;
+    const studentInactive = hasStudent && (user.student_is_active === false || user.student_is_active === 'f' || user.student_is_active === 0);
+    const staffInactive = hasStaff && (user.staff_is_active === false || user.staff_is_active === 'f' || user.staff_is_active === 0);
+    const accountDisabled = !!studentInactive || !!staffInactive;
+
+    let displayName = '';
+    let displayRole = '';
+    if (user.student_first_name || user.student_last_name) {
+      displayName = `${user.student_first_name || ''} ${user.student_last_name || ''}`.trim();
+      displayRole = displayRoleFromRoleRow(user) || 'Student';
+    } else if (user.staff_first_name || user.staff_last_name) {
+      displayName = `${user.staff_first_name || ''} ${user.staff_last_name || ''}`.trim();
+      displayRole = user.designation_name || displayRoleFromRoleRow(user) || 'Teacher';
+    } else {
+      displayName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.username || 'User';
+      displayRole = displayRoleFromRoleRow(user);
+    }
+
+    const userData = {
+      ...user,
+      display_name: displayName,
+      display_role: displayRole,
+      account_disabled: accountDisabled,
+      school_name: tokenUser.school_name,
+      school_type: tokenUser.school_type,
+      institute_number: tokenUser.institute_number,
+    };
+
+    success(res, 200, 'Profile updated', userData);
+  } catch (err) {
+    console.error('UpdateMe error:', err);
+    errorResponse(res, 500, 'Failed to update profile');
+  }
+};
+
+/**
+ * Change password for current user.
+ * Verifies current password against users.password_hash and updates it with bcrypt hash.
+ */
+const changePassword = async (req, res) => {
+  try {
+    const tokenUser = req.user;
+    if (!tokenUser || !tokenUser.id) {
+      return errorResponse(res, 401, 'Not authenticated');
+    }
+    const userId = parseInt(tokenUser.id, 10);
+    const { currentPassword, newPassword } = req.body || {};
+
+    await executeTransaction(async (client) => {
+      const cols = await getTableColumns(client, 'users');
+      if (!cols.has('password_hash')) {
+        throw new Error('Password change is not supported on this database');
+      }
+
+      const r = await client.query(
+        `SELECT password_hash FROM users WHERE id = $1 AND is_active = true LIMIT 1`,
+        [userId]
+      );
+      if (!r.rows || r.rows.length === 0) {
+        const err = new Error('User not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const passwordHash = r.rows[0].password_hash;
+      if (!passwordHash) {
+        const err = new Error('Account not configured for password change. Please contact admin.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      let ok = false;
+      try {
+        ok = await bcrypt.compare(String(currentPassword || ''), String(passwordHash));
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        const err = new Error('Current password is incorrect');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const nextHash = await bcrypt.hash(String(newPassword), 10);
+      const updateRes = await client.query(
+        `UPDATE users SET password_hash = $1 WHERE id = $2 AND is_active = true`,
+        [nextHash, userId]
+      );
+      if (!updateRes || Number(updateRes.rowCount || 0) !== 1) {
+        const err = new Error('Failed to update password');
+        err.statusCode = 500;
+        throw err;
+      }
+    });
+
+    success(res, 200, 'Password changed successfully', null);
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const msg =
+      statusCode === 500
+        ? 'Failed to change password'
+        : (err?.message || 'Failed to change password');
+    if (statusCode === 500) {
+      console.error('ChangePassword error:', err);
+    }
+    return errorResponse(res, statusCode, msg);
+  }
+};
+
+module.exports = { login, getMe, updateMe, changePassword, logout };

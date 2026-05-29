@@ -1,0 +1,93 @@
+const { query } = require('../config/database');
+
+const DEFAULT_GRADE_SCALE = [
+  { id: 1, grade: 'A+', min_percentage: 91, max_percentage: 100, is_active: true },
+  { id: 2, grade: 'A', min_percentage: 86, max_percentage: 90.99, is_active: true },
+  { id: 3, grade: 'B+', min_percentage: 76, max_percentage: 85.99, is_active: true },
+  { id: 4, grade: 'B', min_percentage: 66, max_percentage: 75.99, is_active: true },
+  { id: 5, grade: 'C', min_percentage: 50, max_percentage: 65.99, is_active: true },
+  { id: 6, grade: 'D', min_percentage: 0, max_percentage: 49.99, is_active: true },
+];
+
+function isMissingTableError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return msg.includes('relation') && (msg.includes('exam_grade') || msg.includes('exam_grades'));
+}
+
+async function resolveGradeScaleTable() {
+  const res = await query(
+    `SELECT
+       to_regclass('public.exam_grade') AS exam_grade_table,
+       to_regclass('public.exam_grades') AS exam_grades_table`
+  );
+  const row = res.rows?.[0] || {};
+  if (row.exam_grade_table) return 'exam_grade';
+  if (row.exam_grades_table) return 'exam_grades';
+  return null;
+}
+
+async function loadActiveGradeScale() {
+  try {
+    const table = await resolveGradeScaleTable();
+    if (!table) return DEFAULT_GRADE_SCALE;
+    const res =
+      table === 'exam_grade'
+        ? await query(
+            `SELECT
+               id,
+               grad AS grade,
+               min_precentage AS min_percentage,
+               max_precentage AS max_percentage,
+               is_active
+             FROM exam_grade
+             WHERE is_active = true
+             ORDER BY min_precentage DESC, id ASC`
+          )
+        : await query(
+            `SELECT
+               id,
+               grade_name AS grade,
+               min_percentage AS min_percentage,
+               max_percentage AS max_percentage,
+               is_active
+             FROM exam_grades
+             WHERE is_active = true
+             ORDER BY min_percentage DESC, id ASC`
+          );
+    if (!res.rows.length) return DEFAULT_GRADE_SCALE;
+    return res.rows.map((r) => ({
+      id: Number(r.id),
+      grade: String(r.grade || '').trim(),
+      min_percentage: Number(r.min_percentage),
+      max_percentage: Number(r.max_percentage),
+      is_active: r.is_active !== false,
+    }));
+  } catch (err) {
+    if (isMissingTableError(err)) return DEFAULT_GRADE_SCALE;
+    throw err;
+  }
+}
+
+function getGradeFromScale(percentage, scaleRows = DEFAULT_GRADE_SCALE) {
+  const p = Number(percentage);
+  if (!Number.isFinite(p)) return null;
+  const matched = (scaleRows || []).find(
+    (row) => p >= Number(row.min_percentage) && p <= Number(row.max_percentage)
+  );
+  if (matched) return matched.grade;
+
+  // Safety fallback: if custom ranges have decimal gaps, never return null grade.
+  const defaultMatched = DEFAULT_GRADE_SCALE.find(
+    (row) => p >= Number(row.min_percentage) && p <= Number(row.max_percentage)
+  );
+  return defaultMatched ? defaultMatched.grade : null;
+}
+
+module.exports = {
+  DEFAULT_GRADE_SCALE,
+  loadActiveGradeScale,
+  resolveGradeScaleTable,
+  getGradeFromScale,
+  isMissingTableError,
+};
+

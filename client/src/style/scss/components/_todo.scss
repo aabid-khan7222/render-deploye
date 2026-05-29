@@ -1,0 +1,184 @@
+@use "../utils/variables";
+
+.todo-inbox-check {
+    margin-right: 15px;
+    .checkboxs {
+        margin-bottom: 0;
+        display: flex;
+        align-items: center;
+        input ~ .checkmarks {
+            border-color: rgba(145, 158, 171, 0.30);
+            border-radius: 5px;
+            margin-top: 0;
+            width: 20px;
+            height: 20px;
+        }
+        input {
+            &:checked {
+                ~ .checkmarks{
+                    border-color: variables.$primary;
+                    background-color:variables.$primary;
+                }
+            }
+        }
+    }    
+}
+.todo-accordion{
+    .accordion-button:after{
+        display: none;
+    }
+}
+.todo-calendar  .input-groupicon.calender-input input {
+    padding-left: 10px;
+}
+.todo-calendar {
+    position: relative;
+    .calender-input {
+        position: relative;
+        .info-img {
+            position: absolute;
+            top: 11px;
+            z-index: 100;
+            width: 16px;
+            height: 16px;
+            right: 5px !important;
+            color: variables.$text-color;
+        } 
+    }   
+}
+.todo-accordion {
+    .accordion-item {
+        background: transparent;
+        margin-bottom: 30px;
+        .accordion-header {
+            cursor: pointer;
+            .accordion-button {
+                background: transparent;
+                padding: 0;
+                &.collapsed {
+                    .todo-today-content {
+                        margin-bottom: 0;
+                    }
+                }
+            }
+            .todo-drop-down {
+                a {
+                    span {
+                        i {
+                            color: variables.$text-color;
+                        }
+                    }
+                }
+            }
+        }
+         .accordion-body {
+            padding: 0;
+         }
+
+    }
+}
+.section-bulk-wrap {
+    .form-sort {
+        .ti-filter {
+            position: absolute;
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 100;
+        }
+    }
+}
+.input-block {
+    &.todo-inbox-check {
+        margin-bottom: 0;
+        position: relative;
+    }
+}
+/* Todo sidebar — explicit colors so items stay visible (not only on hover) */
+.notes-page-wrapper {
+    .todo-sidebar-panel {
+        .todo-folder-nav {
+            button.todo-folder-item {
+                display: flex;
+                align-items: center;
+                width: 100%;
+                border: 0;
+                background: transparent;
+                color: variables.$text-color;
+                font-size: 15px;
+                font-weight: 600;
+                padding: 10px 12px;
+                margin-bottom: 8px;
+                border-radius: 10px;
+                cursor: pointer;
+                transition: background 0.2s ease, color 0.2s ease;
+
+                i {
+                    color: inherit;
+                }
+
+                &:hover,
+                &.active {
+                    background: variables.$dark;
+                    color: variables.$white;
+                }
+            }
+        }
+
+        .todo-filter-link {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            border: 0;
+            background: transparent;
+            padding: 4px 0;
+            margin-bottom: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            text-align: left;
+
+            &.is-active {
+                font-weight: 700;
+            }
+        }
+    }
+}
+.square-rotate {
+    transform: rotate(45deg);
+}
+.todo-strike-content {
+    .strike-info {
+        h4 {
+            text-decoration: line-through;
+        }
+        p {
+            text-decoration: line-through;
+        }
+    }
+}
+
+#todo-delete-modal {
+    .modal-dialog {
+        max-width: 420px;
+    }
+    .delete-icon {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        margin: 0 auto 20px;
+        align-items: center;
+        justify-content: center;
+        background: variables.$danger-100;
+        color: variables.$danger;
+        font-size: 32px;
+    }
+    h4 {
+        font-size: 18px;
+        font-weight: 600;
+        color: variables.$dark;
+    }
+    p {
+        font-size: 14px;
+        line-height: 1.5;
+    }
+}

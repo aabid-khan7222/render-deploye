@@ -1,0 +1,52 @@
+import { useState, useEffect } from 'react';
+import { apiService } from '../services/apiService';
+
+/**
+ * Hook to fetch subjects, optionally filtered by class and academic year.
+ * @param {number|string|null} classId 
+ * @param {object} options 
+ * @param {number|string|null} options.academicYearId
+ * @param {boolean} [options.fetchAllWhenNoClass=true]
+ */
+export const useSubjects = (classId = null, options = {}) => {
+  const fetchAllWhenNoClass = options.fetchAllWhenNoClass !== false;
+  const [subjects, setSubjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchSubjects = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      setSubjects([]); // Clear previous data to prevent stale dropdowns
+      if (!fetchAllWhenNoClass && (classId == null || classId === '')) {
+        return;
+      }
+      const response = classId
+        ? await apiService.getSubjectsByClass(classId, options.academicYearId)
+        : await apiService.getSubjects();
+      
+      if (response.status === 'SUCCESS') {
+        setSubjects(response.data);
+      } else {
+        setError('Failed to fetch subjects data');
+      }
+    } catch (err) {
+      console.error('Error fetching subjects:', err);
+      setError(err.message || 'Failed to fetch subjects data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchSubjects();
+  }, [classId, fetchAllWhenNoClass, options.academicYearId]);
+
+  return {
+    subjects,
+    loading,
+    error,
+    refetch: fetchSubjects
+  };
+};

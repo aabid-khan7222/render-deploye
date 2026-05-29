@@ -1,0 +1,1036 @@
+import { useRef, useState, useEffect, useMemo, useCallback } from "react";
+import { exportToExcel, exportToPDF, printData } from "../../../core/utils/exportUtils";
+import { useClassesWithSections } from "../../../core/hooks/useClassesWithSections";
+import { useTeachers } from "../../../core/hooks/useTeachers";
+import { apiService } from "../../../core/services/apiService";
+import Table from "../../../core/common/dataTable/index";
+import PredefinedDateRanges from "../../../core/common/datePicker";
+import {
+  activeList,
+} from "../../../core/common/selectoption/selectoption";
+import CommonSelect from "../../../core/common/commonSelect";
+import type { TableData } from "../../../core/data/interface";
+import { Link } from "react-router-dom";
+import TooltipOption from "../../../core/common/tooltipOption";
+import { all_routes } from "../../router/all_routes";
+
+type EditRow = {
+  classId: number;
+  sectionId: number | null;
+  className: string;
+  sectionName: string;
+  noOfStudents: number;
+  noOfSubjects: number;
+  status: string;
+  class_teacher_id: number | null;
+  section_teacher_id: number | null;
+  class_code?: string | null;
+  /** From `classes` row (same for all section rows of that class). */
+  max_students?: number | null;
+  class_fee?: number | string | null;
+  class_description?: string | null;
+};
+
+const Classes = () => {
+  const { classesWithSections, loading, error, refetch } = useClassesWithSections();
+  const { teachers = [] } = useTeachers();
+  const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
+  const editModalRef = useRef<HTMLDivElement | null>(null);
+  const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modalCleanupTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [editingRow, setEditingRow] = useState<EditRow | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState<"success" | "danger" | "info">("info");
+  const [selectedDeleteRow, setSelectedDeleteRow] = useState<EditRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [addForm, setAddForm] = useState({
+    className: "",
+    classCode: "",
+    maxStudents: "",
+    description: "",
+    isActive: true,
+  });
+  const [filterClass, setFilterClass] = useState("Select");
+  const [filterStatus, setFilterStatus] = useState("Select");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+  const [editForm, setEditForm] = useState({
+    className: "",
+    sectionName: "",
+    isActive: true,
+    classCode: "",
+    maxStudents: "",
+    description: "",
+  });
+
+
+
+  const teacherSelectOptions = useMemo(
+    () => [
+      { value: "Select", label: "No teacher assigned" },
+      ...teachers.map((t: any) => ({
+        value: String(t.staff_id),
+        label: `${t.first_name || ""} ${t.last_name || ""}`.trim() || `Staff #${t.staff_id}`,
+      })),
+    ],
+    [teachers]
+  );
+
+  useEffect(() => {
+    if (editingRow) {
+      setEditForm({
+        className: editingRow.className,
+        sectionName: editingRow.sectionName,
+        isActive: editingRow.status === "Active",
+
+        classCode: editingRow.class_code || "",
+        maxStudents: editingRow.max_students != null ? String(editingRow.max_students) : "",
+        description: editingRow.class_description || "",
+      });
+    }
+  }, [editingRow]);
+
+  useEffect(() => {
+    return () => {
+      if (notificationTimeoutRef.current) {
+        clearTimeout(notificationTimeoutRef.current);
+      }
+      if (modalCleanupTimeoutRef.current) {
+        clearTimeout(modalCleanupTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  /** Bootstrap sometimes leaves .modal-backdrop and body.modal-open after hide(); removes stuck overlay. */
+  const cleanupModalBackdrops = () => {
+    if (modalCleanupTimeoutRef.current) {
+      clearTimeout(modalCleanupTimeoutRef.current);
+    }
+    modalCleanupTimeoutRef.current = setTimeout(() => {
+      document.querySelectorAll(".modal-backdrop").forEach((node) => node.remove());
+      document.body.classList.remove("modal-open");
+      document.body.style.removeProperty("overflow");
+      document.body.style.removeProperty("padding-right");
+    }, 150);
+  };
+
+  const showNotification = (msg: string, type: "success" | "danger" | "info" = "info") => {
+    setMessage(msg);
+    setMessageType(type);
+    if (notificationTimeoutRef.current) {
+      clearTimeout(notificationTimeoutRef.current);
+    }
+    notificationTimeoutRef.current = setTimeout(() => {
+      setMessage("");
+    }, 5000);
+  };
+
+  const handleEditClick = (record: EditRow) => {
+    setEditingRow(record);
+    const el = document.getElementById("edit_class");
+    if (el) {
+      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(el);
+      if (modal) modal.show();
+    }
+  };
+
+  const closeEditModalAndCleanup = () => {
+    const el = document.getElementById("edit_class");
+    if (el) {
+      const modal = (window as any).bootstrap?.Modal?.getInstance(el);
+      if (modal) modal.hide();
+    }
+    setEditingRow(null);
+    cleanupModalBackdrops();
+  };
+
+  const handleEditSave = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!editingRow) return;
+    if (!editForm.className.trim()) {
+      showNotification("Class name is required", "danger");
+      return;
+    }
+    setSaving(true);
+    const parseNum = (s: string) => {
+      const t = s.trim();
+      if (t === "") return null;
+      const n = Number(t);
+      return Number.isNaN(n) ? null : n;
+    };
+    try {
+      if (editingRow.sectionId) {
+        // Update Section status only
+        await apiService.updateSection(editingRow.sectionId, {
+          section_name: editForm.sectionName,
+          is_active: editForm.isActive,
+        });
+      }
+      // Always update class-level fields
+      const payload: Record<string, any> = {
+        class_name: editForm.className.trim(),
+        class_code: editForm.classCode.trim() || null,
+        max_students: parseNum(editForm.maxStudents),
+        description: editForm.description.trim() || null,
+        is_active: editForm.isActive,
+      };
+      await apiService.updateClass(editingRow.classId, payload);
+      await refetch();
+      showNotification("Updated successfully", "success");
+      closeEditModalAndCleanup();
+    } catch (err) {
+      console.error("Failed to save:", err);
+      showNotification("Failed to save changes", "danger");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAddClass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addForm.className.trim()) return;
+    setAdding(true);
+    try {
+
+      const parseOptInt = (s: string) => {
+        const t = s.trim();
+        if (t === "") return undefined;
+        const n = parseInt(t, 10);
+        return Number.isNaN(n) ? undefined : n;
+      };
+
+      const payload: Record<string, unknown> = {
+        class_name: addForm.className.trim(),
+        is_active: addForm.isActive,
+      };
+      const code = addForm.classCode.trim();
+      if (code) payload.class_code = code;
+      const maxS = parseOptInt(addForm.maxStudents);
+      if (maxS !== undefined) payload.max_students = maxS;
+      const desc = addForm.description.trim();
+      if (desc) payload.description = desc;
+
+      const createRes = (await apiService.createClass(payload)) as {
+        status?: string;
+        message?: string;
+        data?: unknown;
+      };
+      if (createRes?.status !== "SUCCESS") {
+        throw new Error(createRes?.message || "Class was not created");
+      }
+      await refetch();
+
+      // Close modal first
+      const addEl = document.getElementById("add_class");
+      if (addEl) {
+        const bs = (window as any).bootstrap?.Modal;
+        const modal = bs?.getInstance(addEl) ?? bs?.getOrCreateInstance(addEl);
+        modal?.hide();
+      }
+      cleanupModalBackdrops();
+
+      // Clear form and show success
+      setAddForm({
+        className: "",
+        classCode: "",
+        maxStudents: "",
+        description: "",
+        isActive: true,
+      });
+      showNotification("Class created successfully", "success");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to create class";
+      showNotification(msg, "danger");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedDeleteRow) return;
+    setDeleting(true);
+    try {
+      if (selectedDeleteRow.sectionId) await apiService.deleteSection(selectedDeleteRow.sectionId);
+      else await apiService.deleteClass(selectedDeleteRow.classId);
+      await refetch();
+      showNotification("Deleted successfully", "success");
+      setSelectedDeleteRow(null);
+      const delEl = document.getElementById("delete-modal");
+      if (delEl) {
+        const bs = (window as any).bootstrap?.Modal;
+        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
+        modal?.hide();
+      }
+      cleanupModalBackdrops();
+    } catch {
+      showNotification("Failed to delete record", "danger");
+      const delEl = document.getElementById("delete-modal");
+      if (delEl) {
+        const bs = (window as any).bootstrap?.Modal;
+        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
+        modal?.hide();
+      }
+      cleanupModalBackdrops();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleApplyClick = () => {
+    if (dropdownMenuRef.current) {
+      dropdownMenuRef.current.classList.remove("show");
+    }
+  };
+
+  const route = all_routes;
+
+  // Transform section-joined data to one row per class.
+  const transformedData = useMemo(() => {
+    const byClass = new Map<number, any>();
+    classesWithSections.forEach((item: any) => {
+      const classId = item.classId;
+      if (!classId) return;
+      const classTotalStudents =
+        Number.isFinite(Number(item.classTotalStudents)) && Number(item.classTotalStudents) >= 0
+          ? Number(item.classTotalStudents)
+          : null;
+      if (!byClass.has(classId)) {
+        byClass.set(classId, {
+          id: classId,
+          class: item.className || "N/A",
+          classCode: item.classCode || "—",
+          teacherStaffId: item.class_teacher_id ?? null,
+          noOfStudents: classTotalStudents ?? 0,
+          noOfSubjects: item.noOfSubjects || 0,
+          status: item.classStatus ? "Active" : "Inactive",
+          action: "",
+          classId,
+          sectionId: null,
+          className: item.className || "N/A",
+          sectionName: "",
+          class_teacher_id: item.class_teacher_id ?? null,
+          section_teacher_id: null,
+          class_code: item.classCode ?? null,
+          max_students: item.maxStudents ?? null,
+          class_fee: item.classFee ?? null,
+          class_description: item.classDescription ?? null,
+          section_ids: item.section_ids || [],
+          classTeacherName: item.classTeacherName || "",
+          hasClassTotalStudents: classTotalStudents != null,
+        });
+      }
+      const row = byClass.get(classId);
+      // Prefer class-level total from classes API; fallback to section roll-up only when unavailable.
+      if (!row.hasClassTotalStudents) row.noOfStudents += Number(item.noOfStudents || 0);
+      row.noOfSubjects = Math.max(Number(row.noOfSubjects || 0), Number(item.noOfSubjects || 0));
+    });
+    return Array.from(byClass.values()).map((row, index) => {
+      const teacher = teachers.find(
+        (t: any) =>
+          String(t.staff_id) === String(row.teacherStaffId) ||
+          String(t.id) === String(row.teacherStaffId)
+      );
+      const teacherDisplay =
+        (teacher
+          ? `${teacher.first_name || ""} ${teacher.last_name || ""}`.trim() || `Staff #${teacher.staff_id || teacher.id}`
+          : "") ||
+        String(row.classTeacherName || "").trim() ||
+        "—";
+      return {
+        ...row,
+        key: String(index + 1),
+        teacher: teacherDisplay,
+      };
+    });
+  }, [classesWithSections, teachers]);
+  const dynamicClassOptions = useMemo(
+    () => [{ value: "Select", label: "Select" }, ...Array.from(new Set(transformedData.map((r: any) => r.class))).map((v) => ({ value: v, label: v }))],
+    [transformedData]
+  );
+  const filteredData = transformedData
+    .filter((r: any) =>
+      (filterClass === "Select" || r.class === filterClass) &&
+      (filterStatus === "Select" || r.status === filterStatus)
+    )
+    .sort((a: any, b: any) =>
+      sortOrder === "asc" ? String(a.class).localeCompare(String(b.class)) : String(b.class).localeCompare(String(a.class))
+    );
+
+  const exportColumns = useMemo(
+    () => [
+      { title: "ID", dataKey: "id" },
+      { title: "Class", dataKey: "class" },
+      { title: "Class Code", dataKey: "classCode" },
+      { title: "Status", dataKey: "status" },
+    ],
+    []
+  );
+
+  const exportRows = useMemo(
+    () =>
+      filteredData.map((row: any) => ({
+        id: String(row.id ?? ""),
+        class: String(row.class ?? ""),
+        classCode: row.classCode === "—" ? "" : String(row.classCode ?? ""),
+        status: String(row.status ?? ""),
+      })),
+    [filteredData]
+  );
+
+  const handleToolbarRefresh = useCallback(() => {
+    void refetch();
+  }, [refetch]);
+
+  const handleExportExcel = useCallback(() => {
+    if (!exportRows.length) return;
+    exportToExcel(exportRows, "classes-list", "Classes");
+  }, [exportRows]);
+
+  const handleExportPdf = useCallback(() => {
+    if (!exportRows.length) return;
+    exportToPDF(exportRows, "Classes", "classes-list", exportColumns);
+  }, [exportRows, exportColumns]);
+
+  const handlePrint = useCallback(() => {
+    if (!exportRows.length) return;
+    printData("Classes", exportColumns, exportRows);
+  }, [exportRows, exportColumns]);
+
+  const columns = [
+    {
+      title: "ID",
+      dataIndex: "id",
+      render: (value: string) => (
+        <>
+          <Link to="#" className="link-primary">
+            {value || "-"}
+          </Link>
+        </>
+      ),
+    },
+
+    {
+      title: "Class",
+      dataIndex: "class",
+      sorter: (a: TableData, b: TableData) => a.class.length - b.class.length,
+    },
+    {
+      title: "Class code",
+      dataIndex: "classCode",
+      sorter: (a: any, b: any) =>
+        String(a.classCode || "").localeCompare(String(b.classCode || "")),
+    },
+    {
+      title: "Status",
+      dataIndex: "status",
+      render: (text: string) => (
+        <>
+          {text === "Active" ? (
+            <span className="badge badge-soft-success d-inline-flex align-items-center">
+              <i className="ti ti-circle-filled fs-5 me-1"></i>
+              {text}
+            </span>
+          ) : (
+            <span className="badge badge-soft-danger d-inline-flex align-items-center">
+              <i className="ti ti-circle-filled fs-5 me-1"></i>
+              {text}
+            </span>
+          )}
+        </>
+      ),
+    },
+    {
+      title: "Action",
+      dataIndex: "action",
+      render: (_: any, record: any) => (
+        <>
+          <div className="d-flex align-items-center">
+            <div className="dropdown">
+              <Link
+                to="#"
+                className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
+                data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
+                aria-expanded="false"
+              >
+                <i className="ti ti-dots-vertical fs-14" />
+              </Link>
+              <ul className="dropdown-menu dropdown-menu-end p-2">
+                <li>
+                  <Link
+                    className="dropdown-item rounded-1"
+                    to="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleEditClick(record as EditRow);
+                    }}
+                  >
+                    <i className="ti ti-edit-circle me-2" />
+                    Edit
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    className="dropdown-item rounded-1"
+                    to="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setSelectedDeleteRow(record as EditRow);
+                      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("delete-modal"));
+                      modal?.show();
+                    }}
+                  >
+                    <i className="ti ti-trash-x me-2" />
+                    Delete
+                  </Link>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </>
+      ),
+    },
+  ];
+
+  // Show loading state
+  if (loading) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show error state
+  if (error) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '400px' }}>
+            <div className="text-center">
+              <i className="ti ti-alert-circle fs-1 text-danger mb-3"></i>
+              <h4>Error Loading Classes</h4>
+              <p className="text-muted">{error}</p>
+              <button className="btn btn-primary" onClick={() => window.location.reload()}>
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Page Wrapper */}
+      <div className="page-wrapper">
+        <div className="content">
+          {/* Page Header */}
+          <div className="d-md-flex d-block align-items-center justify-content-between mb-3">
+            <div className="my-auto mb-2">
+              <h3 className="page-title mb-1">Classes</h3>
+              <nav>
+                <ol className="breadcrumb mb-0">
+                  <li className="breadcrumb-item">
+                    <Link to={route.adminDashboard}>Dashboard</Link>
+                  </li>
+                  <li className="breadcrumb-item">
+                    <Link to="#">Classes </Link>
+                  </li>
+                  <li className="breadcrumb-item active" aria-current="page">
+                    All Classes
+                  </li>
+                </ol>
+              </nav>
+            </div>
+            <div className="d-flex my-xl-auto right-content align-items-center flex-wrap">
+              <TooltipOption
+                onRefresh={handleToolbarRefresh}
+                onPrint={handlePrint}
+                onExportPdf={handleExportPdf}
+                onExportExcel={handleExportExcel}
+              />
+              <div className="mb-2">
+                <Link
+                  to="#"
+                  className="btn btn-primary"
+                  data-bs-toggle="modal"
+                  data-bs-target="#add_class"
+                >
+                  <i className="ti ti-square-rounded-plus-filled me-2" />
+                  Add Class
+                </Link>
+              </div>
+            </div>
+          </div>
+          {/* /Page Header */}
+          {/* Classes List */}
+          {message ? (
+            <div className={`alert alert-${messageType} alert-dismissible fade show`} role="alert">
+              {message}
+              <button type="button" className="btn-close" onClick={() => setMessage("")} aria-label="Close"></button>
+            </div>
+          ) : null}
+          <div className="card">
+            <div className="card-header d-flex align-items-center justify-content-between flex-wrap pb-0">
+              <h4 className="mb-3">Classes</h4>
+              <div className="d-flex align-items-center flex-wrap">
+                <div className="input-icon-start mb-3 me-2 position-relative">
+                  <PredefinedDateRanges />
+                </div>
+                <div className="dropdown mb-3 me-2">
+                  <Link
+                    to="#"
+                    className="btn btn-outline-light bg-white dropdown-toggle"
+                    data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
+                    data-bs-auto-close="outside"
+                  >
+                    <i className="ti ti-filter me-2" />
+                    Filter
+                  </Link>
+                  <div className="dropdown-menu drop-width" ref={dropdownMenuRef}>
+                    <form >
+                      <div className="d-flex align-items-center border-bottom p-3">
+                        <h4>Filter</h4>
+                      </div>
+                      <div className="p-3 border-bottom pb-0">
+                        <div className="row">
+                          <div className="col-md-12">
+                            <div className="mb-3">
+                              <label className="form-label">Class</label>
+                              <CommonSelect
+                                className="select"
+                                options={dynamicClassOptions}
+                                defaultValue={dynamicClassOptions[0]}
+                                onChange={(v) => setFilterClass(v || "Select")}
+                              />
+                            </div>
+                          </div>
+                          <div className="col-md-12">
+                            <div className="mb-3">
+                              <label className="form-label">Status</label>
+                              <CommonSelect
+                                className="select"
+                                options={activeList}
+                                defaultValue={activeList[0]}
+                                onChange={(v) => setFilterStatus(v || "Select")}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="p-3 d-flex align-items-center justify-content-end">
+                        <Link to="#" className="btn btn-light me-3" onClick={() => { setFilterClass("Select"); setFilterStatus("Select"); }}>
+                          Reset
+                        </Link>
+                        <Link
+                          to="#"
+                          className="btn btn-primary"
+                          onClick={handleApplyClick}
+                        >
+                          Apply
+                        </Link>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+                <div className="dropdown mb-3">
+                  <Link
+                    to="#"
+                    className="btn btn-outline-light bg-white dropdown-toggle"
+                    data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
+                  >
+                    <i className="ti ti-sort-ascending-2 me-2" />
+                    Sort by A-Z
+                  </Link>
+                  <ul className="dropdown-menu p-3">
+                    <li>
+                      <Link to="#" className="dropdown-item rounded-1 active" onClick={() => setSortOrder("asc")}>
+                        Ascending
+                      </Link>
+                    </li>
+                    <li>
+                      <Link to="#" className="dropdown-item rounded-1" onClick={() => setSortOrder("desc")}>
+                        Descending
+                      </Link>
+                    </li>
+                    <li>
+                      <Link to="#" className="dropdown-item rounded-1">
+                        Recently Viewed
+                      </Link>
+                    </li>
+                    <li>
+                      <Link to="#" className="dropdown-item rounded-1">
+                        Recently Added
+                      </Link>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div className="card-body p-0 py-3">
+              {/* Classes List */}
+              <Table columns={columns} dataSource={filteredData} Selection={true} />
+              {/* /Classes List */}
+            </div>
+          </div>
+          {/* /Classes List */}
+        </div>
+      </div>
+      {/* /Page Wrapper */}
+      <>
+        {/* Add Classes */}
+        <div className="modal fade" id="add_class">
+          <div className="modal-dialog modal-dialog-centered modal-lg">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h4 className="modal-title">Add Class</h4>
+                <button
+                  type="button"
+                  className="btn-close custom-btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                >
+                  <i className="ti ti-x" />
+                </button>
+              </div>
+              <form onSubmit={handleAddClass}>
+                <div className="modal-body">
+                  <div className="row">
+                    <div className="col-md-6">
+                      <div className="mb-3">
+                        <label className="form-label">
+                          Class name <span className="text-danger">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          maxLength={50}
+                          value={addForm.className}
+                          onChange={(e) =>
+                            setAddForm((f) => ({ ...f, className: e.target.value }))
+                          }
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div className="col-md-6">
+                      <div className="mb-3">
+                        <label className="form-label">Class code</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          maxLength={10}
+                          placeholder="e.g. C10"
+                          value={addForm.classCode}
+                          onChange={(e) =>
+                            setAddForm((f) => ({ ...f, classCode: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="col-md-6">
+                      <div className="mb-3">
+                        <label className="form-label">Max students</label>
+                        <input
+                          type="number"
+                          className="form-control"
+                          min={1}
+                          max={10000}
+                          placeholder="Default 30 if empty"
+                          value={addForm.maxStudents}
+                          onChange={(e) =>
+                            setAddForm((f) => ({ ...f, maxStudents: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-md-12">
+                      <div className="mb-3">
+                        <label className="form-label">Description</label>
+                        <textarea
+                          className="form-control"
+                          rows={2}
+                          maxLength={5000}
+                          placeholder="Optional"
+                          value={addForm.description}
+                          onChange={(e) =>
+                            setAddForm((f) => ({ ...f, description: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-md-12">
+                      <div className="d-flex align-items-center justify-content-between">
+                        <div className="status-title">
+                          <h5>Status</h5>
+                          <p>Change the Status by toggle </p>
+                        </div>
+                        <div className="form-check form-switch">
+                          <input
+                            className="form-check-input"
+                            type="checkbox"
+                            role="switch"
+                            id="switch-sm"
+                            checked={addForm.isActive}
+                            onChange={(e) =>
+                              setAddForm((f) => ({ ...f, isActive: e.target.checked }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <Link
+                    to="#"
+                    className="btn btn-light me-2"
+                    data-bs-dismiss="modal"
+                  >
+                    Cancel
+                  </Link>
+                  <button type="submit" className="btn btn-primary" disabled={adding}>
+                    {adding ? "Adding..." : "Add Class"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        {/* /Add Classes */}
+
+        {/* Edit Classes */}
+        <div className="modal fade" id="edit_class" ref={editModalRef}>
+          <div className="modal-dialog modal-dialog-centered modal-lg">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h4 className="modal-title">Edit Class</h4>
+                <button
+                  type="button"
+                  className="btn-close custom-btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                >
+                  <i className="ti ti-x" />
+                </button>
+              </div>
+              <form onSubmit={(e) => e.preventDefault()}>
+                <div className="modal-body">
+                  <div className="row">
+                    <div className="col-md-12">
+                      <div className="mb-3">
+                        <label className="form-label">Class Name</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          placeholder="Enter Class Name"
+                          value={editForm.className}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, className: e.target.value }))
+                          }
+                          required
+                          maxLength={50}
+                        />
+                      </div>
+                    </div>
+                    <div className="col-md-6">
+                      <div className="mb-3">
+                        <label className="form-label">Class code</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          maxLength={10}
+                          value={editForm.classCode}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, classCode: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="col-md-6">
+                      <div className="mb-3">
+                        <label className="form-label">Max students</label>
+                        <input
+                          type="number"
+                          className="form-control"
+                          min={1}
+                          max={10000}
+                          placeholder="Empty clears (optional)"
+                          value={editForm.maxStudents}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, maxStudents: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-md-12">
+                      <div className="mb-3">
+                        <label className="form-label">Description</label>
+                        <textarea
+                          className="form-control"
+                          rows={2}
+                          maxLength={5000}
+                          value={editForm.description}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, description: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-md-12">
+                      <div className="d-flex align-items-center justify-content-between">
+                        <div className="status-title">
+                          <h5>Status</h5>
+                          <p>Change the Status by toggle </p>
+                        </div>
+                        <div className="form-check form-switch">
+                          <input
+                            className="form-check-input"
+                            type="checkbox"
+                            role="switch"
+                            id="switch-sm2"
+                            checked={editForm.isActive}
+                            onChange={(e) =>
+                              setEditForm((f) => ({ ...f, isActive: e.target.checked }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <Link
+                    to="#"
+                    className="btn btn-light me-2"
+                    data-bs-dismiss="modal"
+                  >
+                    Cancel
+                  </Link>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleEditSave}
+                    disabled={saving}
+                  >
+                    {saving ? "Saving..." : "Save Changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        {/* /Edit Classes */}
+
+        {/* Delete Modal */}
+        <div className="modal fade" id="delete-modal">
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content">
+              <div className="modal-body text-center">
+                <span className="delete-icon">
+                  <i className="ti ti-trash-x" />
+                </span>
+                <h4>Confirm Deletion</h4>
+                <p>
+                  You want to delete all the marked items, this cant be undone
+                  once you delete.
+                </p>
+                <div className="d-flex justify-content-center">
+                  <Link
+                    to="#"
+                    className="btn btn-light me-3"
+                    data-bs-dismiss="modal"
+                  >
+                    Cancel
+                  </Link>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    onClick={handleDelete}
+                    disabled={deleting}
+                  >
+                    {deleting ? "Deleting..." : "Yes, Delete"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {/* /Delete Modal */}
+
+        {/* View Classes */}
+        <div className="modal fade" id="view_class">
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content">
+              <div className="modal-header">
+                <div className="d-flex align-items-center">
+                  <h4 className="modal-title">Class Details</h4>
+                  <span className="badge badge-soft-success ms-2">
+                    <i className="ti ti-circle-filled me-1 fs-5" />
+                    Active
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-close custom-btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                >
+                  <i className="ti ti-x" />
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="row">
+                  <div className="col-md-6">
+                    <div className="class-detail-info">
+                      <p>Class Name</p>
+                      <span>{editingRow?.className || "N/A"}</span>
+                    </div>
+                  </div>
+                  <div className="col-md-6">
+                    <div className="class-detail-info">
+                      <p>Class Code</p>
+                      <span>{editingRow?.class_code || "N/A"}</span>
+                    </div>
+                  </div>
+                  <div className="col-md-6">
+                    <div className="class-detail-info">
+                      <p>Max Students</p>
+                      <span>{editingRow?.max_students || "N/A"}</span>
+                    </div>
+                  </div>
+                  <div className="col-md-6">
+                    <div className="class-detail-info">
+                      <p>No of Students</p>
+                      <span>{editingRow?.noOfStudents || 0}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {/* /View Classes */}
+      </>
+    </div>
+  );
+};
+
+export default Classes;
+
+
+
+
+
