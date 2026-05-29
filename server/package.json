@@ -1,0 +1,61 @@
+{
+  "name": "preskool-server",
+  "version": "1.0.0",
+  "description": "PreSkool School Management System Backend API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "dev:restart": "node scripts/dev-restart.js",
+    "provisioning:template-hash": "node scripts/provisioningTemplateHash.js",
+    "db:master:migrate:all": "node scripts/db-runner.js --db master --sql migrations/master/",
+    "db:master:migrate": "node scripts/db-runner.js --db master --sql migrations/master/masters_schema.sql",
+    "db:master:migrate:saas": "node scripts/db-runner.js --db master --sql migrations/master/20260514120000_saas_plans_enquiries.sql",
+    "db:master:migrate:saas-pricing": "node scripts/db-runner.js --db master --sql migrations/master/20260515120000_saas_plans_pricing.sql",
+    "db:master:migrate:help-support": "node scripts/db-runner.js --db master --sql migrations/master/20260523120000_help_support_module.sql",
+    "db:master:seed:admin": "node scripts/db-runner.js --db master --sql seeds/master/super_admin_seed.sql",
+    "db:master:seed:demo-school": "node scripts/db-runner.js --db master --sql seeds/master/demo_school_registry_seed.sql",
+    "db:master:create-demo-db": "node scripts/create-db.js sxis_school_db",
+    "db:master:provision:all": "node scripts/provision-all-databases.js",
+    "db:tenants:migrate:all": "node scripts/tenant-bulk-runner.js --sql migrations/tenant/",
+    "db:tenants:migrate:hostel": "node scripts/tenant-bulk-runner.js --sql migrations/tenant/20260511183000_hostel_module_phase1_production.sql",
+    "db:tenants:seed:lookups": "node scripts/tenant-bulk-runner.js --sql seeds/tenant/tenant_seed.sql",
+    "db:tenants:seed:demo": "node scripts/tenant-bulk-runner.js --sql seeds/tenant/demo_school_seed.sql",
+    "db:project:setup": "npm run db:master:migrate && npm run db:master:seed:admin",
+    "db:demo:setup": "npm run db:master:migrate && npm run db:master:seed:admin && npm run db:master:seed:demo-school && npm run db:master:provision:all && npm run db:tenants:migrate:all && npm run db:tenants:seed:demo",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:attendance": "node --test test/attendanceValidation.test.js"
+  },
+  "keywords": [
+    "school",
+    "management",
+    "api",
+    "express",
+    "postgresql"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.3.1",
+    "helmet": "^7.1.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.1.1",
+    "pdfkit": "^0.18.0",
+    "pg": "^8.11.3",
+    "pg-copy-streams": "^7.0.0",
+    "sanitize-html": "^2.13.0",
+    "sharp": "^0.33.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
