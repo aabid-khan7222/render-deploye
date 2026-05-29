@@ -24,6 +24,7 @@ const ALLRoutes: React.FC = () => {
   return (
     <>
       <Routes>
+      <Route path="/test-super-admin" element={<h1>SUPER ADMIN TEST PAGE</h1>} />
         <Route path="/" element={<Login />} />
         {/* Super Admin routes - completely separate from tenant dashboards */}
         <Route path="/super-admin/login" element={<SuperAdminLogin />} />
