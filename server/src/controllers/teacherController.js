@@ -1,10 +1,16 @@
-const fs = require('fs');
+const path = require('path');
 const { query, executeTransaction, runWithTenant } = require('../config/database');
 const { ADMIN_ROLE_IDS } = require('../config/roles');
 const { success, error: errorResponse } = require('../utils/responseHelper');
 const { canAccessClass, parseId, getAuthContext, isAdmin, resolveTeacherIdForUser } = require('../utils/accessControl');
 const { createTeacherUser } = require('../utils/createPersonUser');
-const { resolveTeacherDocumentPath, sanitizeTenant } = require('../utils/teacherDocumentStorage');
+const { sanitizeTenant } = require('../utils/teacherDocumentStorage');
+const {
+  LEGACY_NAMESPACES,
+  writeLegacyAsset,
+  readLegacyAsset,
+  deleteLegacyAsset,
+} = require('../storage/legacyAssetStorage');
 const { resolveAcademicYearId } = require('../utils/academicYear');
 const { enrichStaffProfileAllocations } = require('../services/profileAllocationDetailsService');
 const {
@@ -1759,22 +1765,21 @@ const getTeacherClassAttendance = async (req, res) => {
   }
 };
 
-function unlinkTeacherDocStored(relPath) {
-  const abs = resolveTeacherDocumentPath(relPath);
-  if (!abs) return;
-  try {
-    if (fs.existsSync(abs)) fs.unlinkSync(abs);
-  } catch (e) {
-    console.error('unlinkTeacherDocStored:', e);
-  }
+function buildTeacherDocFilename(teacherId, fieldname) {
+  const field = fieldname === 'joining_letter' ? 'joining' : 'resume';
+  const safeId = Number.isNaN(Number(teacherId)) ? '0' : String(teacherId);
+  return `teacher_${safeId}_${field}_${Date.now()}.pdf`;
 }
 
-function unlinkMulterTemp(file) {
-  if (!file?.path) return;
+async function unlinkTeacherDocStored(relPath) {
+  if (!relPath) return;
   try {
-    if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    await deleteLegacyAsset({
+      namespace: LEGACY_NAMESPACES.TEACHER_DOC,
+      storedKey: relPath,
+    });
   } catch (e) {
-    console.error('unlinkMulterTemp:', e);
+    console.warn('unlinkTeacherDocStored:', e.message);
   }
 }
 
@@ -1796,8 +1801,6 @@ const uploadTeacherDocuments = async (req, res) => {
 
     const dbName = req.tenant?.db_name;
     if (!dbName || !String(dbName).trim()) {
-      if (resumeFile) unlinkMulterTemp(resumeFile);
-      if (letterFile) unlinkMulterTemp(letterFile);
       return errorResponse(res, 500, 'Tenant context missing', 'CONFIG_ERROR');
     }
 
@@ -1807,16 +1810,33 @@ const uploadTeacherDocuments = async (req, res) => {
 
       const prev = await query('SELECT resume, joining_letter FROM staff WHERE id = $1', [teacherId]);
       if (!prev.rows.length) {
-        if (resumeFile) unlinkMulterTemp(resumeFile);
-        if (letterFile) unlinkMulterTemp(letterFile);
         return errorResponse(res, 404, 'Teacher (staff) not found', 'NOT_FOUND');
       }
 
       const oldResume = prev.rows[0].resume;
       const oldLetter = prev.rows[0].joining_letter;
 
-      const newResumeRel = resumeFile ? `${tenant}/${resumeFile.filename}` : null;
-      const newLetterRel = letterFile ? `${tenant}/${letterFile.filename}` : null;
+      let newResumeRel = null;
+      let newLetterRel = null;
+
+      if (resumeFile?.buffer) {
+        const filename = buildTeacherDocFilename(teacherId, 'resume');
+        newResumeRel = `${tenant}/${filename}`;
+        await writeLegacyAsset({
+          namespace: LEGACY_NAMESPACES.TEACHER_DOC,
+          storedKey: newResumeRel,
+          buffer: resumeFile.buffer,
+        });
+      }
+      if (letterFile?.buffer) {
+        const filename = buildTeacherDocFilename(teacherId, 'joining_letter');
+        newLetterRel = `${tenant}/${filename}`;
+        await writeLegacyAsset({
+          namespace: LEGACY_NAMESPACES.TEACHER_DOC,
+          storedKey: newLetterRel,
+          buffer: letterFile.buffer,
+        });
+      }
 
       const upd = await query(
         `UPDATE staff SET
@@ -1828,13 +1848,11 @@ const uploadTeacherDocuments = async (req, res) => {
       );
 
       if (upd.rowCount < 1) {
-        if (resumeFile) unlinkMulterTemp(resumeFile);
-        if (letterFile) unlinkMulterTemp(letterFile);
         return errorResponse(res, 404, 'Teacher (staff) not found or could not update', 'NOT_FOUND');
       }
 
-      if (resumeFile && oldResume && oldResume !== newResumeRel) unlinkTeacherDocStored(oldResume);
-      if (letterFile && oldLetter && oldLetter !== newLetterRel) unlinkTeacherDocStored(oldLetter);
+      if (newResumeRel && oldResume && oldResume !== newResumeRel) await unlinkTeacherDocStored(oldResume);
+      if (newLetterRel && oldLetter && oldLetter !== newLetterRel) await unlinkTeacherDocStored(oldLetter);
 
       const refreshed = await query(
         `SELECT resume, joining_letter, updated_at FROM staff WHERE id = $1`,
@@ -1892,15 +1910,27 @@ const getTeacherDocument = async (req, res) => {
       }
 
       const rel = row.doc_path;
-      const abs = resolveTeacherDocumentPath(rel);
-      if (!abs || !fs.existsSync(abs)) {
+      if (!rel) {
         return errorResponse(res, 404, 'Document not found or file missing');
+      }
+
+      let buf;
+      try {
+        buf = await readLegacyAsset({
+          namespace: LEGACY_NAMESPACES.TEACHER_DOC,
+          storedKey: rel,
+        });
+      } catch (err) {
+        if (err.code === 'ENOENT' || err.code === 'STORAGE_NOT_FOUND') {
+          return errorResponse(res, 404, 'Document not found or file missing');
+        }
+        throw err;
       }
 
       const downloadName = column === 'joining_letter' ? 'joining-letter.pdf' : 'resume.pdf';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`);
-      return res.sendFile(abs);
+      return res.status(200).send(buf);
     });
   } catch (error) {
     console.error('getTeacherDocument:', error);

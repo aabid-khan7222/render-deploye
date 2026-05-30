@@ -1,6 +1,9 @@
 // Load env first (local .env; on Render, env is injected by platform)
 require('dotenv').config();
 
+const { validateStorageAtStartup } = require('./src/storage');
+validateStorageAtStartup();
+
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');

@@ -1,13 +1,13 @@
-const fs = require('fs');
 const path = require('path');
 const { query } = require('../config/database');
 const { success, error: errorResponse } = require('../utils/responseHelper');
-
-const ensureSettingsDir = () => {
-  const dir = path.join(process.cwd(), 'uploads', 'settings');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-};
+const {
+  LEGACY_NAMESPACES,
+  writeLegacyAsset,
+  readLegacyAsset,
+  getMimeFromFilename,
+} = require('../storage/legacyAssetStorage');
+const { sanitizeFilename } = require('../utils/schoolLogoStorage');
 
 const getSettings = async (req, res) => {
   try {
@@ -19,13 +19,12 @@ const getSettings = async (req, res) => {
       params.push(group);
     }
     const r = await query(sql, params);
-    
-    // Convert array to key-value object
+
     const settings = {};
     for (const row of r.rows) {
       settings[row.setting_key] = row.setting_value;
     }
-    
+
     return success(res, 200, 'Settings fetched', settings);
   } catch (err) {
     console.error('getSettings error:', err);
@@ -40,7 +39,7 @@ const upsertSettings = async (req, res) => {
     if (!settings || typeof settings !== 'object') {
       return errorResponse(res, 400, 'Invalid settings body');
     }
-    
+
     for (const [key, value] of Object.entries(settings)) {
       await query(
         `INSERT INTO settings (setting_key, setting_value, setting_group, created_at, updated_at)
@@ -59,13 +58,21 @@ const upsertSettings = async (req, res) => {
 
 const uploadFile = async (req, res) => {
   try {
-    if (!req.file) {
+    if (!req.file?.buffer) {
       return errorResponse(res, 400, 'File is required');
     }
-    const filename = req.file.filename;
-    // URL matching our new static route
+
+    const ext = path.extname(req.file.originalname || '').toLowerCase() || '.bin';
+    const filename = `settings-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+
+    await writeLegacyAsset({
+      namespace: LEGACY_NAMESPACES.SETTINGS,
+      storedKey: filename,
+      buffer: req.file.buffer,
+    });
+
     const fileUrl = `/settings/file/${filename}`;
-    
+
     return success(res, 200, 'File uploaded', { url: fileUrl });
   } catch (err) {
     console.error('uploadFile error:', err);
@@ -75,14 +82,23 @@ const uploadFile = async (req, res) => {
 
 const getFile = async (req, res) => {
   try {
-    const filename = String(req.params.filename).replace(/[^a-zA-Z0-9._-]/g, '');
+    const filename = sanitizeFilename(req.params.filename);
     if (!filename) return errorResponse(res, 400, 'Invalid filename');
-    
-    const filePath = path.join(ensureSettingsDir(), filename);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).send('Not Found');
+
+    try {
+      const buf = await readLegacyAsset({
+        namespace: LEGACY_NAMESPACES.SETTINGS,
+        storedKey: filename,
+      });
+      res.setHeader('Content-Type', getMimeFromFilename(filename));
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.status(200).send(buf);
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'STORAGE_NOT_FOUND') {
+        return res.status(404).send('Not Found');
+      }
+      throw err;
     }
-    return res.sendFile(filePath);
   } catch (err) {
     console.error('getFile error:', err);
     return errorResponse(res, 500, 'Failed to fetch file');
@@ -94,5 +110,4 @@ module.exports = {
   upsertSettings,
   uploadFile,
   getFile,
-  ensureSettingsDir
 };

@@ -7,7 +7,11 @@ const { error: errorResponse } = require('../utils/responseHelper');
 const { canAccessStudent } = require('../utils/accessControl');
 const { ROLES } = require('../config/roles');
 const { getSchoolProfile } = require('../services/schoolProfileService');
-const { resolveExistingLogoPath, sanitizeFilename, sanitizeTenant } = require('../utils/schoolLogoStorage');
+const {
+  LEGACY_NAMESPACES,
+  readLegacyAsset,
+  parseSchoolLogoRef,
+} = require('../storage/legacyAssetStorage');
 const { STUDENT_CONTACT_LATERAL_SELECT, STUDENT_CONTACT_LATERAL_JOINS } = require('../utils/studentContactSync');
 const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
 
@@ -38,8 +42,6 @@ function resolveLogoPathOrUrl(logoUrl) {
   let value = String(logoUrl || '').trim();
   if (!value) return null;
 
-  // If an absolute URL is stored (https://.../api/school/profile/logo/...),
-  // use only the pathname so PDF resolves from local filesystem.
   if (/^https?:\/\//i.test(value)) {
     try {
       value = new URL(value).pathname || value;
@@ -48,20 +50,6 @@ function resolveLogoPathOrUrl(logoUrl) {
     }
   }
 
-  if (value.startsWith('/api/school/profile/logo/')) {
-    const parts = value.split('/').filter(Boolean);
-    const tenant = sanitizeTenant(parts[4] || '');
-    const file = sanitizeFilename(parts[5] || '');
-    if (!tenant || !file) return null;
-    return resolveExistingLogoPath(tenant, file);
-  }
-  if (value.startsWith('/uploads/school-logos/')) {
-    const parts = value.split('/').filter(Boolean);
-    const tenant = sanitizeTenant(parts[2] || '');
-    const file = sanitizeFilename(parts[3] || '');
-    if (!tenant || !file) return null;
-    return resolveExistingLogoPath(tenant, file);
-  }
   if (value.startsWith('/assets/') || value.startsWith('assets/')) {
     const rel = value.replace(/^\/+/, '');
     const serverCwdPath = path.join(process.cwd(), '../client/public', rel);
@@ -74,6 +62,27 @@ function resolveLogoPathOrUrl(logoUrl) {
 }
 
 async function getLogoBuffer(logoUrl) {
+  const ref = parseSchoolLogoRef(logoUrl);
+  if (ref?.storedKey) {
+    try {
+      const buffer = await readLegacyAsset({
+        namespace: LEGACY_NAMESPACES.SCHOOL_LOGO,
+        storedKey: ref.storedKey,
+      });
+      const ext = path.extname(ref.filename || '').toLowerCase();
+      if (ext === '.png' || ext === '.jpg' || ext === '.jpeg') {
+        return buffer;
+      }
+      try {
+        return await sharp(buffer).png().toBuffer();
+      } catch {
+        return null;
+      }
+    } catch (err) {
+      console.warn('[bonafide] School logo not found in storage:', ref.storedKey, err.message);
+    }
+  }
+
   const source = resolveLogoPathOrUrl(logoUrl);
   if (!source) return null;
   if (!fs.existsSync(source)) return null;
@@ -82,12 +91,10 @@ async function getLogoBuffer(logoUrl) {
     return fs.readFileSync(source);
   }
   try {
-    // PDFKit is most reliable with PNG/JPEG; normalize others (svg/webp/bmp/gif) to PNG buffer.
     return await sharp(source).png().toBuffer();
   } catch {
     return null;
   }
-  return null;
 }
 
 async function resolveFirstWorkingLogoBuffer(candidates) {

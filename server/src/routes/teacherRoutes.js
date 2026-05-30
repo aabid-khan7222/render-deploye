@@ -15,25 +15,11 @@ const {
   uploadTeacherDocuments,
   getTeacherDocument,
 } = require('../controllers/teacherController');
-const { ensureTenantTeacherDocDir, sanitizeTenant } = require('../utils/teacherDocumentStorage');
 
 const router = express.Router();
 
-const teacherDocStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    cb(null, ensureTenantTeacherDocDir(tenant));
-  },
-  filename: (req, file, cb) => {
-    const tid = parseInt(req.params.id, 10);
-    const field = file.fieldname === 'joining_letter' ? 'joining' : 'resume';
-    const safeId = Number.isNaN(tid) ? '0' : String(tid);
-    cb(null, `teacher_${safeId}_${field}_${Date.now()}.pdf`);
-  },
-});
-
 const teacherDocUpload = multer({
-  storage: teacherDocStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 4 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || '').toLowerCase();

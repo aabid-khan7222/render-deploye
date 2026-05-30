@@ -33,9 +33,73 @@ function getStorageRoot() {
   return path.resolve(process.cwd(), 'storage');
 }
 
+const SUPPORTED_STORAGE_DRIVERS = Object.freeze(['local', 'cloudinary']);
+
+function getStorageDriver() {
+  return String(process.env.STORAGE_DRIVER || 'local').trim().toLowerCase();
+}
+
+function getCloudinaryFolderPrefix() {
+  return String(process.env.CLOUDINARY_FOLDER_PREFIX || '').trim();
+}
+
+function getCloudinaryConfig() {
+  return {
+    cloudName: String(process.env.CLOUDINARY_CLOUD_NAME || '').trim(),
+    apiKey: String(process.env.CLOUDINARY_API_KEY || '').trim(),
+    apiSecret: String(process.env.CLOUDINARY_API_SECRET || '').trim(),
+  };
+}
+
+/**
+ * Fail fast when STORAGE_DRIVER=cloudinary is misconfigured.
+ * Never silently fall back to local when cloudinary is requested.
+ */
+function validateStorageAtStartup() {
+  const driver = getStorageDriver();
+
+  if (!SUPPORTED_STORAGE_DRIVERS.includes(driver)) {
+    console.error(
+      `❌ Invalid STORAGE_DRIVER="${driver}". Supported values: ${SUPPORTED_STORAGE_DRIVERS.join(', ')}.`
+    );
+    process.exit(1);
+  }
+
+  if (driver !== 'cloudinary') {
+    return;
+  }
+
+  const cfg = getCloudinaryConfig();
+  const missing = [];
+  if (!cfg.cloudName) missing.push('CLOUDINARY_CLOUD_NAME');
+  if (!cfg.apiKey) missing.push('CLOUDINARY_API_KEY');
+  if (!cfg.apiSecret) missing.push('CLOUDINARY_API_SECRET');
+
+  if (missing.length > 0) {
+    console.error(
+      `❌ STORAGE_DRIVER=cloudinary requires these environment variables: ${missing.join(', ')}`
+    );
+    process.exit(1);
+  }
+
+  try {
+    const { ensureCloudinaryConfigured } = require('./CloudinaryStorageProvider');
+    ensureCloudinaryConfigured();
+    console.log('✅ Cloudinary storage configured (authenticated delivery, API proxy unchanged).');
+  } catch (err) {
+    console.error(`❌ Cloudinary storage initialization failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 module.exports = {
   ALLOWED_FOLDERS,
   ALLOWED_EXTENSIONS,
   getMaxUploadBytes,
   getStorageRoot,
+  getStorageDriver,
+  getCloudinaryFolderPrefix,
+  getCloudinaryConfig,
+  validateStorageAtStartup,
+  SUPPORTED_STORAGE_DRIVERS,
 };

@@ -16,26 +16,11 @@ const {
   uploadStaffPhoto,
   getStaffPhoto,
 } = require('../controllers/staffController');
-const { ensureTenantStaffDocDir } = require('../utils/staffDocumentStorage');
-const { ensureTenantStaffProfileDir, sanitizeTenant } = require('../utils/staffProfileStorage');
 
 const router = express.Router();
 
-const staffDocStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    cb(null, ensureTenantStaffDocDir(tenant));
-  },
-  filename: (req, file, cb) => {
-    const sid = parseInt(req.params.id, 10);
-    const field = file.fieldname === 'joining_letter' ? 'joining' : 'resume';
-    const safeId = Number.isNaN(sid) ? '0' : String(sid);
-    cb(null, `staff_${safeId}_${field}_${Date.now()}.pdf`);
-  },
-});
-
 const staffDocUpload = multer({
-  storage: staffDocStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 4 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || '').toLowerCase();
@@ -50,22 +35,9 @@ const staffDocUpload = multer({
   },
 });
 
-const staffPhotoStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    cb(null, ensureTenantStaffProfileDir(tenant));
-  },
-  filename: (req, file, cb) => {
-    const sid = parseInt(req.params.id, 10);
-    const safeId = Number.isNaN(sid) ? '0' : String(sid);
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-    cb(null, `staff_${safeId}_profile_${Date.now()}${ext}`);
-  },
-});
-
 const staffPhotoUpload = multer({
-  storage: staffPhotoStorage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB for profile photo
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || '').toLowerCase();
     const ok = mime.startsWith('image/');

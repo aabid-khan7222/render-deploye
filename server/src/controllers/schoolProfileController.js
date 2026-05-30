@@ -1,15 +1,22 @@
 const path = require('path');
-const fs = require('fs');
 const sharp = require('sharp');
 const { query, masterQuery } = require('../config/database');
 const { success, error: errorResponse } = require('../utils/responseHelper');
 const { getSchoolProfile, ensureSchoolProfile } = require('../services/schoolProfileService');
 const { sanitizeChatText } = require('../utils/htmlSanitize');
 const {
-  resolveExistingLogoPath,
   sanitizeFilename,
   sanitizeTenant,
 } = require('../utils/schoolLogoStorage');
+const {
+  LEGACY_NAMESPACES,
+  writeLegacyAsset,
+  readLegacyAsset,
+  deleteLegacyAsset,
+  buildSchoolLogoApiUrl,
+  parseSchoolLogoRef,
+  getMimeFromFilename,
+} = require('../storage/legacyAssetStorage');
 
 function normalizeOptionalText(value, maxLen) {
   if (value == null) return null;
@@ -18,29 +25,8 @@ function normalizeOptionalText(value, maxLen) {
   return next.slice(0, maxLen);
 }
 
-/** Resize large logos to fit within 512×512 (keeps aspect ratio); reduces upload failures and layout issues. */
-async function optimizeSchoolLogoInPlace(filePath) {
-  const tmpPath = `${filePath}.opt`;
-  const pipeline = sharp(filePath).rotate().resize(512, 512, {
-    fit: 'inside',
-    withoutEnlargement: true,
-  });
-  const meta = await sharp(filePath).metadata();
-  const fmt = meta.format;
-  if (fmt === 'png') {
-    await pipeline.png({ compressionLevel: 9 }).toFile(tmpPath);
-  } else if (fmt === 'jpeg') {
-    await pipeline.jpeg({ quality: 88, mozjpeg: true }).toFile(tmpPath);
-  } else if (fmt === 'webp') {
-    await pipeline.webp({ quality: 88 }).toFile(tmpPath);
-  } else {
-    await pipeline.png().toFile(tmpPath);
-  }
-  fs.renameSync(tmpPath, filePath);
-}
-
-async function validateLogoImageShape(filePath) {
-  const meta = await sharp(filePath).metadata();
+async function validateLogoImageShape(buffer) {
+  const meta = await sharp(buffer).metadata();
   const width = Number(meta.width || 0);
   const height = Number(meta.height || 0);
   if (!width || !height) {
@@ -49,8 +35,6 @@ async function validateLogoImageShape(filePath) {
     throw err;
   }
 
-  // Reject banner-like images: logo should not be extremely wide.
-  // Allows most normal logos (square/portrait/moderately landscape).
   const maxAspectRatio = 3;
   if (width / height > maxAspectRatio) {
     const err = new Error('Image is too wide for a logo. Please upload a logo-style image.');
@@ -59,11 +43,23 @@ async function validateLogoImageShape(filePath) {
   }
 }
 
-function normalizeLogoUrl(filePath) {
-  const tenant = sanitizeTenant(path.basename(path.dirname(String(filePath || ''))));
-  const filename = sanitizeFilename(path.basename(String(filePath || '')));
-  if (!tenant || !filename) return null;
-  return `/api/school/profile/logo/${tenant}/${filename}`;
+async function optimizeSchoolLogoBuffer(buffer) {
+  const meta = await sharp(buffer).metadata();
+  const fmt = meta.format;
+  const pipeline = sharp(buffer).rotate().resize(512, 512, {
+    fit: 'inside',
+    withoutEnlargement: true,
+  });
+  if (fmt === 'png') {
+    return pipeline.png({ compressionLevel: 9 }).toBuffer();
+  }
+  if (fmt === 'jpeg') {
+    return pipeline.jpeg({ quality: 88, mozjpeg: true }).toBuffer();
+  }
+  if (fmt === 'webp') {
+    return pipeline.webp({ quality: 88 }).toBuffer();
+  }
+  return pipeline.png().toBuffer();
 }
 
 function sendInlineFallbackLogo(res) {
@@ -161,31 +157,22 @@ const updateProfile = async (req, res) => {
 
 const uploadLogo = async (req, res) => {
   try {
-    if (!req.file) {
+    if (!req.file?.buffer) {
       return errorResponse(res, 400, 'Logo file is required');
     }
 
     try {
-      await validateLogoImageShape(req.file.path);
+      await validateLogoImageShape(req.file.buffer);
     } catch (shapeErr) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
       const msg = shapeErr?.message || 'Invalid logo image';
       return errorResponse(res, shapeErr.statusCode || 400, msg);
     }
 
+    let optimizedBuffer;
     try {
-      await optimizeSchoolLogoInPlace(req.file.path);
+      optimizedBuffer = await optimizeSchoolLogoBuffer(req.file.buffer);
     } catch (optErr) {
       console.error('School logo optimize error:', optErr);
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
       return errorResponse(
         res,
         400,
@@ -193,16 +180,22 @@ const uploadLogo = async (req, res) => {
       );
     }
 
-    await ensureSchoolProfile(req.user?.school_name || null);
-    const logoUrl = normalizeLogoUrl(req.file.path);
+    const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
+    const ext = path.extname(req.file.originalname || '').toLowerCase() || '.png';
+    const filename = `logo_${Date.now()}${ext}`;
+    const storedKey = `${tenant}/${filename}`;
+    const logoUrl = buildSchoolLogoApiUrl(tenant, filename);
     if (!logoUrl) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
       return errorResponse(res, 400, 'Invalid logo path');
     }
+
+    await writeLegacyAsset({
+      namespace: LEGACY_NAMESPACES.SCHOOL_LOGO,
+      storedKey,
+      buffer: optimizedBuffer,
+    });
+
+    await ensureSchoolProfile(req.user?.school_name || null);
 
     const prevRes = await query(
       `SELECT logo_url FROM school_profile ORDER BY id ASC LIMIT 1`
@@ -219,11 +212,6 @@ const uploadLogo = async (req, res) => {
 
     const schoolId = req.user?.school_id;
     if (schoolId == null) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
       await query(
         `UPDATE school_profile SET logo_url = $1, updated_at = NOW()
          WHERE id = (SELECT id FROM school_profile ORDER BY id ASC LIMIT 1)`,
@@ -248,11 +236,6 @@ const uploadLogo = async (req, res) => {
       } catch (revertErr) {
         console.error('School logo: revert school_profile after master failure:', revertErr);
       }
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch {
-        /* ignore */
-      }
       return errorResponse(
         res,
         500,
@@ -262,11 +245,12 @@ const uploadLogo = async (req, res) => {
 
     if (previousLogoUrl && previousLogoUrl !== logoUrl) {
       try {
-        const tenant = sanitizeTenant(req.tenant?.db_name);
-        const filename = sanitizeFilename(path.basename(previousLogoUrl));
-        const oldPath = resolveExistingLogoPath(tenant, filename);
-        if (oldPath && fs.existsSync(oldPath)) {
-          fs.unlinkSync(oldPath);
+        const ref = parseSchoolLogoRef(previousLogoUrl);
+        if (ref?.storedKey) {
+          await deleteLegacyAsset({
+            namespace: LEGACY_NAMESPACES.SCHOOL_LOGO,
+            storedKey: ref.storedKey,
+          });
         }
       } catch (err) {
         console.warn('Failed to delete old school logo:', err.message);
@@ -291,11 +275,22 @@ const getLogo = async (req, res) => {
     if (!sessionTenant || tenant !== sessionTenant) {
       return errorResponse(res, 403, 'Access denied');
     }
-    const filePath = resolveExistingLogoPath(tenant, filename);
-    if (!fs.existsSync(filePath)) {
-      return sendInlineFallbackLogo(res);
+
+    const storedKey = `${tenant}/${filename}`;
+    try {
+      const buf = await readLegacyAsset({
+        namespace: LEGACY_NAMESPACES.SCHOOL_LOGO,
+        storedKey,
+      });
+      res.setHeader('Content-Type', getMimeFromFilename(filename));
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      return res.status(200).send(buf);
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'STORAGE_NOT_FOUND') {
+        return sendInlineFallbackLogo(res);
+      }
+      throw err;
     }
-    return res.sendFile(filePath);
   } catch (err) {
     console.error('School logo fetch error:', err);
     return errorResponse(res, 500, 'Failed to fetch logo');
@@ -308,4 +303,3 @@ module.exports = {
   uploadLogo,
   getLogo,
 };
-

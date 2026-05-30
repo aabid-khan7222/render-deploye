@@ -103,7 +103,13 @@ const getSchoolFile = async (req, res) => {
     res.setHeader('Cache-Control', 'private, max-age=3600');
     return res.status(200).send(buf);
   } catch (err) {
-    if (err.code === 'ENOENT' || err.message === 'Invalid storage path' || err.message.includes('Path traversal')) {
+    if (
+      err.code === 'ENOENT' ||
+      err.code === 'STORAGE_NOT_FOUND' ||
+      err.message === 'Invalid storage path' ||
+      err.message.includes('Path traversal') ||
+      err.message.includes('File not found')
+    ) {
       return errorResponse(res, 404, 'File not found');
     }
     console.error('getSchoolFile:', err.message);

@@ -1,12 +1,18 @@
-const fs = require('fs');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 const { query, executeTransaction, runWithTenant, getCurrentTenantDbName } = require('../config/database');
 const { ADMIN_ROLE_IDS, ROLES } = require('../config/roles');
 const { success, error: errorResponse } = require('../utils/responseHelper');
 const { createAdministrativeStaffUser, isUserEmailTaken } = require('../utils/createPersonUser');
 const { deleteFileIfExist } = require('../utils/fileDeleteHelper');
-const { ensureTenantStaffDocDir, resolveStaffDocumentPath, sanitizeTenant } = require('../utils/staffDocumentStorage');
-const { ensureTenantStaffProfileDir, resolveStaffProfilePath } = require('../utils/staffProfileStorage');
+const { sanitizeTenant } = require('../utils/staffDocumentStorage');
+const {
+  LEGACY_NAMESPACES,
+  writeLegacyAsset,
+  readLegacyAsset,
+  deleteLegacyAsset,
+  getMimeFromFilename,
+} = require('../storage/legacyAssetStorage');
 const { enrichStaffProfileAllocations } = require('../services/profileAllocationDetailsService');
 const {
   assertDesignationBelongsToDepartment,
@@ -760,22 +766,27 @@ const deleteStaff = async (req, res) => {
   }
 };
 
-function unlinkStaffDocStored(relPath) {
-  const abs = resolveStaffDocumentPath(relPath);
-  if (!abs) return;
-  try {
-    if (fs.existsSync(abs)) fs.unlinkSync(abs);
-  } catch (e) {
-    console.error('unlinkStaffDocStored:', e);
-  }
+function buildStaffDocFilename(staffId, fieldname) {
+  const field = fieldname === 'joining_letter' ? 'joining' : 'resume';
+  const safeId = Number.isNaN(Number(staffId)) ? '0' : String(staffId);
+  return `staff_${safeId}_${field}_${Date.now()}.pdf`;
 }
 
-function unlinkMulterTemp(file) {
-  if (!file?.path) return;
+function buildStaffPhotoFilename(staffId, originalname) {
+  const safeId = Number.isNaN(Number(staffId)) ? '0' : String(staffId);
+  const ext = path.extname(originalname || '').toLowerCase() || '.jpg';
+  return `staff_${safeId}_profile_${Date.now()}${ext}`;
+}
+
+async function unlinkStaffDocStored(relPath) {
+  if (!relPath) return;
   try {
-    if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    await deleteLegacyAsset({
+      namespace: LEGACY_NAMESPACES.STAFF_DOC,
+      storedKey: relPath,
+    });
   } catch (e) {
-    console.error('unlinkMulterTemp:', e);
+    console.warn('unlinkStaffDocStored:', e.message);
   }
 }
 
@@ -797,8 +808,6 @@ const uploadStaffDocuments = async (req, res) => {
 
     const dbName = req.tenant?.db_name;
     if (!dbName || !String(dbName).trim()) {
-      if (resumeFile) unlinkMulterTemp(resumeFile);
-      if (letterFile) unlinkMulterTemp(letterFile);
       return errorResponse(res, 500, 'Tenant context missing', 'CONFIG_ERROR');
     }
 
@@ -807,16 +816,33 @@ const uploadStaffDocuments = async (req, res) => {
 
       const prev = await query('SELECT resume, joining_letter FROM staff WHERE id = $1', [staffId]);
       if (!prev.rows.length) {
-        if (resumeFile) unlinkMulterTemp(resumeFile);
-        if (letterFile) unlinkMulterTemp(letterFile);
         return errorResponse(res, 404, 'Staff not found', 'NOT_FOUND');
       }
 
       const oldResume = prev.rows[0].resume;
       const oldLetter = prev.rows[0].joining_letter;
 
-      const newResumeRel = resumeFile ? `${tenant}/${resumeFile.filename}` : null;
-      const newLetterRel = letterFile ? `${tenant}/${letterFile.filename}` : null;
+      let newResumeRel = null;
+      let newLetterRel = null;
+
+      if (resumeFile?.buffer) {
+        const filename = buildStaffDocFilename(staffId, 'resume');
+        newResumeRel = `${tenant}/${filename}`;
+        await writeLegacyAsset({
+          namespace: LEGACY_NAMESPACES.STAFF_DOC,
+          storedKey: newResumeRel,
+          buffer: resumeFile.buffer,
+        });
+      }
+      if (letterFile?.buffer) {
+        const filename = buildStaffDocFilename(staffId, 'joining_letter');
+        newLetterRel = `${tenant}/${filename}`;
+        await writeLegacyAsset({
+          namespace: LEGACY_NAMESPACES.STAFF_DOC,
+          storedKey: newLetterRel,
+          buffer: letterFile.buffer,
+        });
+      }
 
       const upd = await query(
         `UPDATE staff SET
@@ -828,13 +854,11 @@ const uploadStaffDocuments = async (req, res) => {
       );
 
       if (upd.rowCount < 1) {
-        if (resumeFile) unlinkMulterTemp(resumeFile);
-        if (letterFile) unlinkMulterTemp(letterFile);
         return errorResponse(res, 404, 'Staff not found or could not update', 'NOT_FOUND');
       }
 
-      if (resumeFile && oldResume && oldResume !== newResumeRel) unlinkStaffDocStored(oldResume);
-      if (letterFile && oldLetter && oldLetter !== newLetterRel) unlinkStaffDocStored(oldLetter);
+      if (newResumeRel && oldResume && oldResume !== newResumeRel) await unlinkStaffDocStored(oldResume);
+      if (newLetterRel && oldLetter && oldLetter !== newLetterRel) await unlinkStaffDocStored(oldLetter);
 
       const refreshed = await query(
         `SELECT resume, joining_letter, updated_at FROM staff WHERE id = $1`,
@@ -892,15 +916,27 @@ const getStaffDocument = async (req, res) => {
       }
 
       const rel = row.doc_path;
-      const abs = resolveStaffDocumentPath(rel);
-      if (!abs || !fs.existsSync(abs)) {
+      if (!rel) {
         return errorResponse(res, 404, 'Document not found or file missing');
+      }
+
+      let buf;
+      try {
+        buf = await readLegacyAsset({
+          namespace: LEGACY_NAMESPACES.STAFF_DOC,
+          storedKey: rel,
+        });
+      } catch (err) {
+        if (err.code === 'ENOENT' || err.code === 'STORAGE_NOT_FOUND') {
+          return errorResponse(res, 404, 'Document not found or file missing');
+        }
+        throw err;
       }
 
       const downloadName = column === 'joining_letter' ? 'joining-letter.pdf' : 'resume.pdf';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`);
-      return res.sendFile(abs);
+      return res.status(200).send(buf);
     });
   } catch (error) {
     console.error('getStaffDocument:', error);
@@ -914,22 +950,35 @@ const uploadStaffPhoto = async (req, res) => {
     const staffId = parseInt(req.params.id, 10);
     if (!staffId || Number.isNaN(staffId)) return errorResponse(res, 400, 'Invalid staff ID');
 
-    if (!req.file) return errorResponse(res, 400, 'No image file uploaded');
+    if (!req.file?.buffer) return errorResponse(res, 400, 'No image file uploaded');
 
     const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    const relativePath = `${tenant}/${req.file.filename}`;
+    const filename = buildStaffPhotoFilename(staffId, req.file.originalname);
+    const relativePath = `${tenant}/${filename}`;
 
     const existing = await query('SELECT photo_url FROM staff WHERE id = $1', [staffId]);
     if (existing.rows.length === 0) {
-      if (req.file.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       return errorResponse(res, 404, 'Staff not found');
     }
 
+    await writeLegacyAsset({
+      namespace: LEGACY_NAMESPACES.STAFF_PROFILE,
+      storedKey: relativePath,
+      buffer: req.file.buffer,
+    });
+
     await query('UPDATE staff SET photo_url = $1, updated_at = NOW() WHERE id = $2', [relativePath, staffId]);
 
-    const oldPath = resolveStaffProfilePath(existing.rows[0].photo_url);
-    if (oldPath && fs.existsSync(oldPath)) {
-      try { fs.unlinkSync(oldPath); } catch (e) { console.warn('Failed to delete old staff photo:', e.message); }
+    const oldPhoto = existing.rows[0].photo_url;
+    if (oldPhoto && oldPhoto !== relativePath) {
+      try {
+        await deleteLegacyAsset({
+          namespace: LEGACY_NAMESPACES.STAFF_PROFILE,
+          storedKey: oldPhoto,
+        });
+      } catch (e) {
+        console.warn('Failed to delete old staff photo:', e.message);
+      }
     }
 
     return success(res, 200, 'Profile photo uploaded successfully', { photo_url: relativePath });
@@ -959,12 +1008,24 @@ const getStaffPhoto = async (req, res) => {
     if (!isAdmin && !isSelf) return errorResponse(res, 403, 'Access denied');
 
     const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    const fullPath = resolveStaffProfilePath(`${tenant}/${filename}`);
+    const storedKey = `${tenant}/${filename}`;
 
-    if (!fullPath || !fs.existsSync(fullPath)) return errorResponse(res, 404, 'Photo not found');
+    let buf;
+    try {
+      buf = await readLegacyAsset({
+        namespace: LEGACY_NAMESPACES.STAFF_PROFILE,
+        storedKey,
+      });
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'STORAGE_NOT_FOUND') {
+        return errorResponse(res, 404, 'Photo not found');
+      }
+      throw err;
+    }
 
-    res.setHeader('Content-Type', 'image/jpeg'); // Basic assumption, browser handles most images
-    return res.sendFile(fullPath);
+    res.setHeader('Content-Type', getMimeFromFilename(filename));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    return res.status(200).send(buf);
   } catch (err) {
     console.error('Error serving staff photo:', err);
     return errorResponse(res, 500, 'Failed to retrieve photo');

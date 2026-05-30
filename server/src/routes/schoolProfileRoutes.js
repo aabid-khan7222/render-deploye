@@ -4,24 +4,12 @@ const multer = require('multer');
 const { requireRole } = require('../middleware/rbacMiddleware');
 const { ADMIN_ROLE_IDS, ALL_AUTHENTICATED_ROLES } = require('../config/roles');
 const { getProfile, updateProfile, uploadLogo, getLogo } = require('../controllers/schoolProfileController');
-const { ensureTenantLogoDir, sanitizeTenant } = require('../utils/schoolLogoStorage');
+const { sanitizeTenant } = require('../utils/schoolLogoStorage');
 
 const router = express.Router();
 
-const logoStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const tenant = sanitizeTenant(req.tenant?.db_name || 'default_tenant') || 'default_tenant';
-    const dir = ensureTenantLogoDir(tenant);
-    cb(null, dir);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
-    cb(null, `logo_${Date.now()}${ext}`);
-  },
-});
-
 const upload = multer({
-  storage: logoStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || '').toLowerCase();
@@ -41,4 +29,3 @@ router.patch('/', requireRole(ADMIN_ROLE_IDS), updateProfile);
 router.post('/logo', requireRole(ADMIN_ROLE_IDS), upload.single('logo'), uploadLogo);
 
 module.exports = router;
-
