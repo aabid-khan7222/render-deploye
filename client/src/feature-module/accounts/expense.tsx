@@ -15,11 +15,11 @@ import { useAccountsPaymentModes } from "./useAccountsPaymentModes";
 import { DatePicker } from "antd";
 import { all_routes } from "../router/all_routes";
 import TooltipOption from "../../core/common/tooltipOption";
-import { apiService } from "../../core/services/apiService";
+import { apiService, getApiBaseUrl } from "../../core/services/apiService";
 import { formatDateMonthDayYear, formatUsdDisplay, toYmdString } from "../../core/utils/dateDisplay";
 import { selectSelectedAcademicYearId } from "../../core/data/redux/academicYearSlice";
 import { getAccountsErrorMessage } from "./accountsApiErrors";
-import { fetchAllAccountsPages, parseAccountsListResponse } from "./accountsListUtils";
+import { fetchAllAccountsPages, parseAccountsListResponse, resolveAccountsStorageFileUrl } from "./accountsListUtils";
 import { exportAccountsExcel, exportAccountsPdf, printAccountsData } from "./accountsExportUtils";
 import { createAccountsTableChangeHandler } from "./accountsTableHandlers";
 
@@ -105,6 +105,11 @@ const Expense = () => {
   const [addFileKey, setAddFileKey] = useState(0);
   const [editFileKey, setEditFileKey] = useState(0);
   const [removeExistingDoc, setRemoveExistingDoc] = useState(false);
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+
+  useEffect(() => {
+    getApiBaseUrl().then(setApiBaseUrl).catch(() => setApiBaseUrl(""));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1034,11 +1039,7 @@ const Expense = () => {
                           <div className="d-flex align-items-center gap-2 overflow-hidden">
                             <i className="ti ti-file-text text-info fs-18 flex-shrink-0" />
                             <a
-                              href={
-                                selectedRecord.raw.file_path.startsWith("http")
-                                  ? selectedRecord.raw.file_path
-                                  : `/api/storage/files/${selectedRecord.raw.file_path}`
-                              }
+                              href={resolveAccountsStorageFileUrl(selectedRecord.raw.file_path, apiBaseUrl)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-truncate text-primary fw-medium"

@@ -11,6 +11,8 @@ services:
     envVars:
       - key: SCHOOL_LOGO_STORAGE_ROOT
         value: /var/data/myschool/school-logos
+      - key: STORAGE_ROOT
+        value: /var/data/myschool/storage
     disk:
       name: myschool-uploads
       mountPath: /var/data

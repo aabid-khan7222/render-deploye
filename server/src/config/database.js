@@ -2,25 +2,37 @@ const { Pool } = require('pg');
 const { AsyncLocalStorage } = require('async_hooks');
 require('dotenv').config();
 
-// Use DATABASE_URL in production (Render)
-// Fallback to local config only if DATABASE_URL not present
-// Cloud DBs (Render, Heroku, etc.) often use self-signed certs.
-// DATABASE_SSL_MODE:
-// - "require" => strict cert verification
-// - "allow-self-signed" => allow self-signed (development only)
-// Default: production is strict; development allows self-signed for convenience.
-let sslConfig = false;
+// Production: DATABASE_URL + MASTER_DATABASE_URL + TENANT_ADMIN_DATABASE_URL (Neon on Render).
+// No localhost fallback when NODE_ENV=production.
+// DATABASE_SSL_MODE: "require" | "allow-self-signed" (production defaults to require when unset).
+const isProduction = process.env.NODE_ENV === 'production';
 
+let sslConfig = false;
 if (process.env.DATABASE_SSL_MODE === 'require') {
+  sslConfig = { rejectUnauthorized: true };
+} else if (process.env.DATABASE_SSL_MODE === 'allow-self-signed') {
+  sslConfig = { rejectUnauthorized: false };
+} else if (isProduction) {
   sslConfig = { rejectUnauthorized: true };
 }
 
-if (process.env.DATABASE_SSL_MODE === 'allow-self-signed') {
-  sslConfig = { rejectUnauthorized: false };
+function exitProductionDatabaseConfig(message) {
+  console.error(message);
+  process.exit(1);
 }
 
-console.log("SSL MODE:", process.env.DATABASE_SSL_MODE);
-console.log("SSL CONFIG:", sslConfig);
+if (isProduction) {
+  for (const key of ['DATABASE_URL', 'MASTER_DATABASE_URL', 'TENANT_ADMIN_DATABASE_URL']) {
+    if (!String(process.env[key] || '').trim()) {
+      exitProductionDatabaseConfig(
+        `[FATAL] Production requires ${key}. No localhost or DB_HOST fallback is permitted.`
+      );
+    }
+  }
+}
+
+console.log('SSL MODE:', process.env.DATABASE_SSL_MODE || (isProduction ? '(default: require)' : '(none)'));
+console.log('SSL CONFIG:', sslConfig);
 
 const tenantContext = new AsyncLocalStorage();
 
@@ -151,6 +163,12 @@ function createPoolForDb(dbName) {
     }
   }
 
+  if (isProduction) {
+    exitProductionDatabaseConfig(
+      `[FATAL] Cannot create pool for "${dbName}" in production without a valid DATABASE_URL or TENANT_ADMIN_DATABASE_URL.`
+    );
+  }
+
   const pool = new Pool({
     ...baseLocalConfig,
     database: dbName,
@@ -194,6 +212,9 @@ const masterPool = (() => {
     });
     attachPoolHandlers(pool, masterDbName);
     return pool;
+  }
+  if (isProduction) {
+    exitProductionDatabaseConfig('[FATAL] Production requires MASTER_DATABASE_URL.');
   }
   return createPoolForDb(masterDbName);
 })();

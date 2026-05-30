@@ -17,10 +17,31 @@ const SERVER_APP_ROOT = path.resolve(__dirname, '../..');
 // Optional fast path (production): PROVISIONING_USE_DB_TEMPLATE_CLONE=true + PROVISIONING_TEMPLATE_DB_NAME
 // uses CREATE DATABASE ... TEMPLATE on Neon when a dedicated template DB is maintained.
 
-// Reuse SSL mode rules similar to database.js
-let sslConfig = { rejectUnauthorized: false };
+// Reuse SSL mode rules from database.js (Neon requires SSL in production).
+const isProduction = process.env.NODE_ENV === 'production';
+let sslConfig = false;
 if (process.env.DATABASE_SSL_MODE === 'require') {
   sslConfig = { rejectUnauthorized: true };
+} else if (process.env.DATABASE_SSL_MODE === 'allow-self-signed') {
+  sslConfig = { rejectUnauthorized: false };
+} else if (isProduction) {
+  sslConfig = { rejectUnauthorized: true };
+}
+
+function exitProductionDatabaseConfig(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function requireTenantAdminDatabaseUrl(context) {
+  const adminUrl = (process.env.TENANT_ADMIN_DATABASE_URL || process.env.DATABASE_URL || '').toString().trim();
+  if (adminUrl) return adminUrl;
+  if (isProduction) {
+    exitProductionDatabaseConfig(
+      `[FATAL] ${context}: Production requires TENANT_ADMIN_DATABASE_URL or DATABASE_URL. No localhost fallback is permitted.`
+    );
+  }
+  return '';
 }
 
 let adminPool = null;
@@ -92,7 +113,7 @@ function shouldUseTemplateDbClone() {
 function getAdminPool() {
   if (adminPool) return adminPool;
 
-  const adminUrl = (process.env.TENANT_ADMIN_DATABASE_URL || process.env.DATABASE_URL || '').toString().trim();
+  const adminUrl = requireTenantAdminDatabaseUrl('getAdminPool');
   if (adminUrl) {
     const templateName = getTemplateDbName();
     try {
@@ -118,43 +139,24 @@ function getAdminPool() {
     return adminPool;
   }
 
-  // Use a DB the app user can already access (same as master registry). Connecting only to
-  // `postgres` breaks common local setups where the app role has CONNECT on school/master DBs but not on postgres.
-  const localAdminDb =
-    (process.env.PROVISIONING_ADMIN_DATABASE_NAME || '').toString().trim() ||
-    (process.env.MASTER_DB_NAME || 'master_db').toString().trim() ||
-    (process.env.DB_NAME || '').toString().trim() ||
-    'postgres';
-
-  adminPool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '',
-    database: localAdminDb,
-    max: 5,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
-  });
-  return adminPool;
+  exitProductionDatabaseConfig(
+    '[FATAL] getAdminPool: TENANT_ADMIN_DATABASE_URL or DATABASE_URL is required.'
+  );
 }
 
 /**
  * Pool for connecting to a specific tenant database (e.g. TRUNCATE, insert headmaster).
  * Production: uses TENANT_ADMIN_DATABASE_URL or DATABASE_URL with swapped db name.
- * Local: uses DB_HOST, DB_PORT, DB_USER, DB_PASSWORD.
  */
 function createPoolForTenantDb(dbName) {
   const attachTenantPoolHandlers = (pool) => {
     pool.on('error', (err) => {
-      // Avoid crashing the process when Neon or admin commands terminate
-      // tenant connections (e.g. error code 57P01).
       console.error(`Unexpected tenant database error for "${dbName}":`, err);
     });
     return pool;
   };
 
-  const baseUrl = (process.env.TENANT_ADMIN_DATABASE_URL || process.env.DATABASE_URL || '').toString().trim();
+  const baseUrl = requireTenantAdminDatabaseUrl(`createPoolForTenantDb("${dbName}")`);
   if (baseUrl) {
     try {
       const u = new URL(baseUrl);
@@ -166,20 +168,16 @@ function createPoolForTenantDb(dbName) {
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 5000,
       }));
-    } catch {
-      /* fall through to local config */
+    } catch (err) {
+      exitProductionDatabaseConfig(
+        `[FATAL] createPoolForTenantDb("${dbName}"): invalid TENANT_ADMIN_DATABASE_URL/DATABASE_URL — ${err.message}`
+      );
     }
   }
-  return attachTenantPoolHandlers(new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '',
-    database: dbName,
-    max: 5,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
-  }));
+
+  exitProductionDatabaseConfig(
+    `[FATAL] createPoolForTenantDb("${dbName}"): TENANT_ADMIN_DATABASE_URL or DATABASE_URL is required.`
+  );
 }
 
 /**
@@ -758,18 +756,7 @@ async function createTenantDatabase(dbName, schoolName = null) {
 }
 
 async function dropTenantDatabaseIfExists(dbName) {
-  const adminUrl = (process.env.TENANT_ADMIN_DATABASE_URL || process.env.DATABASE_URL || '').toString().trim();
-  if (!adminUrl) {
-    const p = getAdminPool();
-    try {
-      await p.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [dbName]
-      );
-    } catch { /* ignore */ }
-    await p.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-    return;
-  }
+  const adminUrl = requireTenantAdminDatabaseUrl(`dropTenantDatabaseIfExists("${dbName}")`);
   const dropPool = new Pool({
     connectionString: adminUrl,
     ssl: sslConfig,

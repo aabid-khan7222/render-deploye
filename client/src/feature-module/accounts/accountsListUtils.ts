@@ -1,3 +1,38 @@
+/**
+ * Resolves accounts attachment file_path to an absolute backend URL (split SPA/API safe).
+ * @param apiBaseUrl — from getApiBaseUrl() (e.g. https://…onrender.com/api)
+ */
+export function resolveAccountsStorageFileUrl(
+  filePath: string | null | undefined,
+  apiBaseUrl: string
+): string {
+  if (!filePath) return "";
+  const raw = String(filePath).trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  const base = apiBaseUrl.replace(/\/+$/, "");
+  let origin = "";
+  try {
+    origin = new URL(base, typeof window !== "undefined" ? window.location.origin : "https://placeholder.invalid").origin;
+  } catch {
+    origin = base.replace(/\/api\/?$/i, "");
+  }
+
+  let p = raw;
+  if (p.startsWith("school_")) {
+    p = `/api/storage/files/${p}`;
+  } else if (p.startsWith("/storage/files/")) {
+    p = `/api${p}`;
+  } else if (p.startsWith("storage/files/")) {
+    p = `/api/${p}`;
+  } else if (!p.startsWith("/api/")) {
+    p = `/api/storage/files/${p}`;
+  }
+  if (!p.startsWith("/")) p = `/${p}`;
+  return `${origin}${p}`;
+}
+
 /** Normalizes paginated GET /api/accounts/* responses. */
 export function parseAccountsListResponse(res: unknown): {
   data: any[];
