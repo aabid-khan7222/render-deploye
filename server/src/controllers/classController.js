@@ -1,4 +1,4 @@
-const { query } = require('../config/database');
+const { query, executeTransaction } = require('../config/database');
 const { success, error: errorResponse } = require('../utils/responseHelper');
 const { resolveAcademicYearId } = require('../utils/academicYear');
 
@@ -289,17 +289,98 @@ const updateClass = async (req, res) => {
   }
 };
 
+const parseClassId = (raw) => {
+  const id = parseInt(raw, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
 const deleteClass = async (req, res) => {
   try {
-    const { id } = req.params;
-    const result = await query(
-      `UPDATE classes SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
-      [id]
+    const classId = parseClassId(req.params.id);
+    if (!classId) return errorResponse(res, 400, 'Invalid class id', 'VALIDATION_ERROR');
+
+    const existing = await query(
+      'SELECT id, class_name FROM classes WHERE id = $1 AND deleted_at IS NULL',
+      [classId]
     );
-    if (!result.rows.length) return errorResponse(res, 404, 'Class not found');
-    return success(res, 200, 'Class deleted successfully', { id: result.rows[0].id });
+    if (!existing.rows.length) return errorResponse(res, 404, 'Class not found');
+
+    const studentCount = await query(
+      `
+      SELECT COUNT(*)::int AS c
+      FROM students st
+      LEFT JOIN LATERAL (
+        SELECT l.to_class_id
+        FROM student_lifecycle_ledger l
+        WHERE l.student_id = st.id
+        ORDER BY l.event_date DESC NULLS LAST, l.id DESC
+        LIMIT 1
+      ) le ON true
+      WHERE st.deleted_at IS NULL
+        AND st.status = 'Active'
+        AND le.to_class_id = $1
+      `,
+      [classId]
+    );
+    const activeStudents = studentCount.rows[0]?.c ?? 0;
+    if (activeStudents > 0) {
+      return errorResponse(
+        res,
+        409,
+        'Cannot delete this class because it has active students assigned. Move or reassign students first.',
+        'IN_USE'
+      );
+    }
+
+    await executeTransaction(async (client) => {
+      const locked = await client.query(
+        'SELECT id FROM classes WHERE id = $1 AND deleted_at IS NULL FOR UPDATE',
+        [classId]
+      );
+      if (!locked.rows.length) {
+        const err = new Error('NOT_FOUND');
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+
+      await client.query(
+        `UPDATE class_teachers
+         SET deleted_at = NOW(), updated_at = NOW()
+         WHERE class_id = $1 AND deleted_at IS NULL`,
+        [classId]
+      );
+      await client.query(
+        `UPDATE class_subjects
+         SET deleted_at = NOW(), updated_at = NOW()
+         WHERE class_id = $1 AND deleted_at IS NULL`,
+        [classId]
+      );
+      await client.query(
+        `UPDATE class_sections
+         SET deleted_at = NOW(), updated_at = NOW()
+         WHERE class_id = $1 AND deleted_at IS NULL`,
+        [classId]
+      );
+      await client.query(
+        `UPDATE classes
+         SET deleted_at = NOW(), updated_at = NOW(), is_active = false
+         WHERE id = $1 AND deleted_at IS NULL`,
+        [classId]
+      );
+    });
+
+    return success(res, 200, 'Class deleted successfully', { id: classId });
   } catch (error) {
     console.error('Error deleting class:', error);
+    if (error.code === 'NOT_FOUND') return errorResponse(res, 404, 'Class not found');
+    if (error.code === '23503') {
+      return errorResponse(
+        res,
+        409,
+        'Cannot delete this class because other records still reference it.',
+        'IN_USE'
+      );
+    }
     return errorResponse(res, 500, 'Failed to delete class');
   }
 };

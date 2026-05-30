@@ -14,6 +14,75 @@ import { Link } from "react-router-dom";
 import TooltipOption from "../../../core/common/tooltipOption";
 import { all_routes } from "../../router/all_routes";
 
+const CLASSES_DELETE_MODAL_ID = "classes_delete_modal";
+
+function cleanupBootstrapModalArtifacts() {
+  setTimeout(() => {
+    document.querySelectorAll(".modal-backdrop").forEach((el) => el.remove());
+    document.body.classList.remove("modal-open");
+    document.body.style.removeProperty("overflow");
+    document.body.style.removeProperty("padding-right");
+  }, 150);
+}
+
+function showBootstrapModal(modalEl: HTMLElement | null) {
+  if (!modalEl) return;
+  const bootstrap = (window as any).bootstrap;
+  if (!bootstrap?.Modal) return;
+  const instance = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+  instance.show();
+}
+
+function hideBootstrapModal(modalEl: HTMLElement | null) {
+  if (!modalEl) {
+    cleanupBootstrapModalArtifacts();
+    return;
+  }
+  const bootstrap = (window as any).bootstrap;
+  if (bootstrap?.Modal?.getOrCreateInstance) {
+    bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+  }
+  cleanupBootstrapModalArtifacts();
+}
+
+function hideBootstrapModalAndWaitForClosed(modalEl: HTMLElement | null): Promise<void> {
+  return new Promise((resolve) => {
+    if (!modalEl) {
+      cleanupBootstrapModalArtifacts();
+      resolve();
+      return;
+    }
+    const bootstrap = (window as any).bootstrap;
+    const inst = bootstrap?.Modal?.getOrCreateInstance?.(modalEl);
+    if (!inst?.hide) {
+      cleanupBootstrapModalArtifacts();
+      resolve();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanupBootstrapModalArtifacts();
+      resolve();
+    };
+    const t = window.setTimeout(finish, 600);
+    const onHidden = () => {
+      window.clearTimeout(t);
+      modalEl.removeEventListener("hidden.bs.modal", onHidden);
+      finish();
+    };
+    modalEl.addEventListener("hidden.bs.modal", onHidden, { once: true });
+    inst.hide();
+  });
+}
+
+function extractApiErrorMessage(err: unknown, fallback: string): string {
+  if (!(err instanceof Error)) return fallback;
+  const match = err.message.match(/message:\s*(.+)$/i);
+  return match?.[1]?.trim() || err.message || fallback;
+}
+
 type EditRow = {
   classId: number;
   sectionId: number | null;
@@ -36,6 +105,7 @@ const Classes = () => {
   const { teachers = [] } = useTeachers();
   const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
   const editModalRef = useRef<HTMLDivElement | null>(null);
+  const deleteModalRef = useRef<HTMLDivElement | null>(null);
   const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modalCleanupTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [editingRow, setEditingRow] = useState<EditRow | null>(null);
@@ -108,11 +178,8 @@ const Classes = () => {
       clearTimeout(modalCleanupTimeoutRef.current);
     }
     modalCleanupTimeoutRef.current = setTimeout(() => {
-      document.querySelectorAll(".modal-backdrop").forEach((node) => node.remove());
-      document.body.classList.remove("modal-open");
-      document.body.style.removeProperty("overflow");
-      document.body.style.removeProperty("padding-right");
-    }, 150);
+      cleanupBootstrapModalArtifacts();
+    }, 0);
   };
 
   const showNotification = (msg: string, type: "success" | "danger" | "info" = "info") => {
@@ -247,35 +314,45 @@ const Classes = () => {
     }
   };
 
+  const openDeleteModal = (record: EditRow) => {
+    setSelectedDeleteRow(record);
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    showBootstrapModal(deleteModalRef.current);
+  };
+
   const handleDelete = async () => {
-    if (!selectedDeleteRow) return;
+    if (!selectedDeleteRow?.classId) return;
     setDeleting(true);
     try {
-      if (selectedDeleteRow.sectionId) await apiService.deleteSection(selectedDeleteRow.sectionId);
-      else await apiService.deleteClass(selectedDeleteRow.classId);
+      await apiService.deleteClass(selectedDeleteRow.classId);
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+      await hideBootstrapModalAndWaitForClosed(deleteModalRef.current);
       await refetch();
-      showNotification("Deleted successfully", "success");
       setSelectedDeleteRow(null);
-      const delEl = document.getElementById("delete-modal");
-      if (delEl) {
-        const bs = (window as any).bootstrap?.Modal;
-        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
-        modal?.hide();
-      }
-      cleanupModalBackdrops();
-    } catch {
-      showNotification("Failed to delete record", "danger");
-      const delEl = document.getElementById("delete-modal");
-      if (delEl) {
-        const bs = (window as any).bootstrap?.Modal;
-        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
-        modal?.hide();
-      }
-      cleanupModalBackdrops();
+      showNotification("Class deleted successfully", "success");
+    } catch (err: unknown) {
+      showNotification(extractApiErrorMessage(err, "Failed to delete class"), "danger");
+      hideBootstrapModal(deleteModalRef.current);
     } finally {
       setDeleting(false);
     }
   };
+
+  useEffect(() => {
+    const deleteModalEl = deleteModalRef.current;
+    if (!deleteModalEl) return;
+    const handleModalHidden = () => {
+      if (!deleting) setSelectedDeleteRow(null);
+    };
+    deleteModalEl.addEventListener("hidden.bs.modal", handleModalHidden);
+    return () => {
+      deleteModalEl.removeEventListener("hidden.bs.modal", handleModalHidden);
+    };
+  }, [deleting]);
 
   const handleApplyClick = () => {
     if (dropdownMenuRef.current) {
@@ -475,9 +552,8 @@ const Classes = () => {
                     to="#"
                     onClick={(e) => {
                       e.preventDefault();
-                      setSelectedDeleteRow(record as EditRow);
-                      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("delete-modal"));
-                      modal?.show();
+                      e.stopPropagation();
+                      openDeleteModal(record as EditRow);
                     }}
                   >
                     <i className="ti ti-trash-x me-2" />
@@ -935,7 +1011,7 @@ const Classes = () => {
         {/* /Edit Classes */}
 
         {/* Delete Modal */}
-        <div className="modal fade" id="delete-modal">
+        <div className="modal fade" id={CLASSES_DELETE_MODAL_ID} ref={deleteModalRef}>
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content">
               <div className="modal-body text-center">
@@ -944,22 +1020,23 @@ const Classes = () => {
                 </span>
                 <h4>Confirm Deletion</h4>
                 <p>
-                  You want to delete all the marked items, this cant be undone
-                  once you delete.
+                  Are you sure you want to delete{" "}
+                  <strong>{selectedDeleteRow?.className || "this class"}</strong>? This action
+                  cannot be undone.
                 </p>
                 <div className="d-flex justify-content-center">
-                  <Link
-                    to="#"
+                  <button
+                    type="button"
                     className="btn btn-light me-3"
                     data-bs-dismiss="modal"
                   >
                     Cancel
-                  </Link>
+                  </button>
                   <button
                     type="button"
                     className="btn btn-danger"
                     onClick={handleDelete}
-                    disabled={deleting}
+                    disabled={deleting || !selectedDeleteRow?.classId}
                   >
                     {deleting ? "Deleting..." : "Yes, Delete"}
                   </button>
