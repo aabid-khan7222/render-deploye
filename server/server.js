@@ -278,7 +278,7 @@ const enforceCsrf = (req, res, next) => {
   const cookieToken = req.cookies?.['XSRF-TOKEN'];
   const headerToken = req.headers['x-xsrf-token'] || req.headers['x-csrf-token'];
   if (!cookieToken || !headerToken || String(cookieToken) !== String(headerToken)) {
-    return errorResponse(res, 403, 'CSRF validation failed');
+    return errorResponse(res, 403, 'CSRF validation failed', 'CSRF_VALIDATION_FAILED');
   }
   return next();
 };

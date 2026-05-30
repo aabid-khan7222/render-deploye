@@ -42,9 +42,19 @@ async function getSuperAdminApiBaseUrl(): Promise<string> {
   return base;
 }
 
-type RequestMeta = { sessionProbe?: boolean };
+type RequestMeta = { sessionProbe?: boolean; csrfRetried?: boolean };
 
 class SuperAdminApiService {
+  /** Sync CSRF for split SPA/API (cookie lives on API host only). */
+  private async attachCsrfHeader(headers: HeadersInit, unsafe: boolean) {
+    if (!unsafe) return;
+    if (!resolveCsrfTokenForRequest()) {
+      await this.ensureCsrfToken();
+    }
+    const csrf = resolveCsrfTokenForRequest();
+    if (csrf) (headers as Record<string, string>)['X-XSRF-TOKEN'] = csrf;
+  }
+
   async makeRequest(endpoint: string, options: RequestInit = {}, meta?: RequestMeta) {
     const base = await getSuperAdminApiBaseUrl();
     const url = `${base}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
@@ -61,10 +71,7 @@ class SuperAdminApiService {
 
     const method = String(options.method || 'GET').toUpperCase();
     const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(method);
-    if (unsafe) {
-      const csrf = resolveCsrfTokenForRequest();
-      if (csrf) (headers as Record<string, string>)['X-XSRF-TOKEN'] = csrf;
-    }
+    await this.attachCsrfHeader(headers, unsafe);
 
     try {
       const response = await fetch(url, {
@@ -87,21 +94,34 @@ class SuperAdminApiService {
           console.debug('[SuperAdmin] Session check: not logged in (401).');
         }
         let apiMessage = text || `HTTP error ${response.status}`;
+        let errorCode = '';
         try {
-          const j = JSON.parse(text) as { message?: string };
+          const j = JSON.parse(text) as { message?: string; code?: string; errorCode?: string };
           if (j && typeof j.message === 'string' && j.message.trim()) {
             apiMessage = j.message.trim();
           }
+          errorCode = String(j?.code || j?.errorCode || '').trim();
         } catch {
           /* use raw text */
+        }
+        if (
+          response.status === 403 &&
+          errorCode === 'CSRF_VALIDATION_FAILED' &&
+          unsafe &&
+          !meta?.csrfRetried
+        ) {
+          clearCachedCsrfToken();
+          await this.ensureCsrfToken();
+          return this.makeRequest(endpoint, options, { ...meta, csrfRetried: true });
         }
         // 401 = missing/expired Super Admin session — clear client auth (not for silent session probe).
         // 403 = wrong password / forbidden action — must NOT log the user out.
         if (response.status === 401 && !meta?.sessionProbe) {
           window.dispatchEvent(new CustomEvent('super-admin:sessionInvalid'));
         }
-        const err = new Error(apiMessage) as Error & { status?: number };
+        const err = new Error(apiMessage) as Error & { status?: number; code?: string };
         err.status = response.status;
+        err.code = errorCode;
         throw err;
       }
 
@@ -137,7 +157,7 @@ class SuperAdminApiService {
   }
 
   /** Cross-origin SPA: sync XSRF into memory (cookie is on API host only). */
-  async ensureCsrfToken() {
+  async ensureCsrfToken(): Promise<boolean> {
     const base = await getSuperAdminApiBaseUrl();
     const url = `${base}/auth/csrf-token`.replace(/([^:]\/)\/+/g, '$1');
     try {
@@ -145,15 +165,20 @@ class SuperAdminApiService {
         method: 'GET',
         credentials: 'include',
         mode: 'cors',
+        cache: 'no-store',
         headers: { Accept: 'application/json' },
       });
       const text = await res.text();
-      if (!res.ok || !text) return;
+      if (!res.ok || !text) return false;
       const data = JSON.parse(text) as { data?: { csrfToken?: string } };
       const token = data?.data?.csrfToken;
-      if (token) setCachedCsrfToken(token);
+      if (token) {
+        setCachedCsrfToken(token);
+        return true;
+      }
+      return false;
     } catch {
-      // ignore
+      return false;
     }
   }
 

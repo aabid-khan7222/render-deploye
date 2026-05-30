@@ -199,13 +199,15 @@ const SuperAdminSchoolList = () => {
   };
 
   const handleDelete = async (school: School) => {
+    await superAdminApiService.ensureCsrfToken();
     const result = await MySwal.fire({
       icon: 'warning',
       title: 'Delete school',
       html: `
         <p class="mb-2 text-start"><strong>${school.school_name}</strong><br/>
         Institute: <strong>${school.institute_number}</strong></p>
-        <p class="mb-0 text-start text-danger small">This removes the school from the platform and may drop its tenant database. Enter your Super Admin password.</p>
+        <p class="mb-0 text-start text-danger small">This removes the school from the platform and may drop its tenant database.</p>
+        <p class="mb-0 text-start small text-muted">Enter your <strong>Super Admin platform login password</strong> (the one you use at /super-admin/login — not the school headmaster password).</p>
       `,
       input: 'password',
       showCancelButton: true,
@@ -221,9 +223,14 @@ const SuperAdminSchoolList = () => {
           await superAdminApiService.deleteSchool(school.id, pwd);
           return true;
         } catch (err: unknown) {
-          const er = err as Error & { status?: number };
-          if (er?.status === 403) Swal.showValidationMessage('Incorrect password');
-          else Swal.showValidationMessage(er?.message || 'Delete failed');
+          const er = err as Error & { status?: number; code?: string };
+          if (er?.code === 'CSRF_VALIDATION_FAILED') {
+            Swal.showValidationMessage('Security token expired. Refresh the page and try again.');
+          } else if (er?.code === 'WRONG_PASSWORD' || er?.status === 403) {
+            Swal.showValidationMessage('Incorrect Super Admin password');
+          } else {
+            Swal.showValidationMessage(er?.message || 'Delete failed');
+          }
           return false;
         }
       },
