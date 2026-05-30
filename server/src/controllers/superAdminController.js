@@ -27,6 +27,17 @@ const {
 } = require('../services/saasSchoolModulesService');
 const { ROLES } = require('../config/roles');
 
+/** Serialize create-school by institute number (prevents double-click / parallel duplicate provisioning). */
+async function withSchoolCreateInstituteLock(instituteNumber, fn) {
+  const lockKey = `create_school:${String(instituteNumber || '').trim()}`;
+  await masterQuery('SELECT pg_advisory_lock(hashtext($1::text))', [lockKey]);
+  try {
+    return await fn();
+  } finally {
+    await masterQuery('SELECT pg_advisory_unlock(hashtext($1::text))', [lockKey]).catch(() => {});
+  }
+}
+
 /**
  * List all schools from master_db.schools.
  * Optionally filter by status via ?status=active|disabled.
@@ -286,130 +297,132 @@ const createSchool = async (req, res) => {
     return errorResponse(res, 400, 'School type is required');
   }
 
-  let existing;
-  try {
-    existing = await masterQuery(
-      `
+  return withSchoolCreateInstituteLock(institute, async () => {
+    let existing;
+    try {
+      existing = await masterQuery(
+        `
       SELECT id, institute_number, db_name
       FROM schools
       WHERE institute_number = $1 AND deleted_at IS NULL
       LIMIT 1
       `,
-      [institute]
-    );
-  } catch (err) {
-    console.error('Super Admin createSchool: master_db lookup failed:', err);
-    return errorResponse(res, 500, 'Failed to validate institute number');
-  }
-
-  if (existing.rows && existing.rows.length > 0) {
-    return errorResponse(res, 400, 'Institute number already exists');
-  }
-
-  // Unique index on db_name applies to ALL rows (including soft-deleted); must not reuse names.
-  let existingDbNames = [];
-  try {
-    const dbRes = await masterQuery(
-      'SELECT db_name FROM schools WHERE db_name IS NOT NULL AND TRIM(db_name) <> \'\''
-    );
-    existingDbNames = (dbRes.rows || []).map((r) => r.db_name).filter(Boolean);
-  } catch {
-    /* ignore; use empty list */
-  }
-
-  const dbName = generateTenantDbName(name, institute, existingDbNames);
-
-  try {
-    await createTenantDatabase(dbName, name);
-  } catch (err) {
-    console.error('Super Admin createSchool: tenant DB creation failed:', err);
-    const message =
-      process.env.NODE_ENV !== 'production' && err && err.message
-        ? `Failed to create tenant database: ${err.message}`
-        : 'Failed to create tenant database';
-    return errorResponse(res, 500, message);
-  }
-
-  let schoolRow;
-  try {
-    let defaultPlanId = null;
-    try {
-      const pr = await masterQuery(`SELECT id FROM saas_plans WHERE slug = 'full' LIMIT 1`);
-      defaultPlanId = pr.rows?.[0]?.id ?? null;
-    } catch {
-      defaultPlanId = null;
+        [institute]
+      );
+    } catch (err) {
+      console.error('Super Admin createSchool: master_db lookup failed:', err);
+      return errorResponse(res, 500, 'Failed to validate institute number');
     }
 
-    const insertRes = defaultPlanId
-      ? await masterQuery(
-          `
+    if (existing.rows && existing.rows.length > 0) {
+      return errorResponse(res, 400, 'Institute number already exists');
+    }
+
+    // Unique index on db_name applies to ALL rows (including soft-deleted); must not reuse names.
+    let existingDbNames = [];
+    try {
+      const dbRes = await masterQuery(
+        'SELECT db_name FROM schools WHERE db_name IS NOT NULL AND TRIM(db_name) <> \'\''
+      );
+      existingDbNames = (dbRes.rows || []).map((r) => r.db_name).filter(Boolean);
+    } catch {
+      /* ignore; use empty list */
+    }
+
+    const dbName = generateTenantDbName(name, institute, existingDbNames);
+
+    try {
+      await createTenantDatabase(dbName, name);
+    } catch (err) {
+      console.error('Super Admin createSchool: tenant DB creation failed:', err);
+      const message =
+        process.env.NODE_ENV !== 'production' && err && err.message
+          ? `Failed to create tenant database: ${err.message}`
+          : 'Failed to create tenant database';
+      return errorResponse(res, 500, message);
+    }
+
+    let schoolRow;
+    try {
+      let defaultPlanId = null;
+      try {
+        const pr = await masterQuery(`SELECT id FROM saas_plans WHERE slug = 'full' LIMIT 1`);
+        defaultPlanId = pr.rows?.[0]?.id ?? null;
+      } catch {
+        defaultPlanId = null;
+      }
+
+      const insertRes = defaultPlanId
+        ? await masterQuery(
+            `
       INSERT INTO schools (school_name, type, institute_number, db_name, status, plan_id)
       VALUES ($1, $2, $3, $4, 'active', $5)
       RETURNING id, school_name, type, institute_number, db_name, status, created_at, plan_id
       `,
-          [name, schoolType, institute, dbName, defaultPlanId]
-        )
-      : await masterQuery(
-          `
+            [name, schoolType, institute, dbName, defaultPlanId]
+          )
+        : await masterQuery(
+            `
       INSERT INTO schools (school_name, type, institute_number, db_name, status)
       VALUES ($1, $2, $3, $4, 'active')
       RETURNING id, school_name, type, institute_number, db_name, status, created_at
       `,
-          [name, schoolType, institute, dbName]
-        );
-    schoolRow = insertRes.rows[0];
-  } catch (err) {
-    console.error('Super Admin createSchool: failed to insert into master_db.schools, rolling back DB:', err);
-    try {
-      await dropTenantDatabaseIfExists(dbName);
-    } catch (dropErr) {
-      console.error('Super Admin createSchool: failed to drop tenant DB after master insert error:', dropErr);
-    }
-    if (err && err.code === '23505') {
-      const detail = String(err.detail || '');
-      if (detail.includes('db_name')) {
+            [name, schoolType, institute, dbName]
+          );
+      schoolRow = insertRes.rows[0];
+    } catch (err) {
+      console.error('Super Admin createSchool: failed to insert into master_db.schools, rolling back DB:', err);
+      try {
+        await dropTenantDatabaseIfExists(dbName);
+      } catch (dropErr) {
+        console.error('Super Admin createSchool: failed to drop tenant DB after master insert error:', dropErr);
+      }
+      if (err && err.code === '23505') {
+        const detail = String(err.detail || '');
+        if (detail.includes('db_name')) {
+          return errorResponse(
+            res,
+            409,
+            'That database name is already registered (it may belong to a removed school). Change the school name or contact support to free the name.',
+            'DUPLICATE_DB_NAME'
+          );
+        }
         return errorResponse(
           res,
           409,
-          'That database name is already registered (it may belong to a removed school). Change the school name or contact support to free the name.',
-          'DUPLICATE_DB_NAME'
+          'This school or institute conflicts with existing data. Check institute number and try again.',
+          'DUPLICATE_KEY'
         );
       }
+      return errorResponse(res, 500, 'Failed to register school in master database');
+    }
+
+    try {
+      await createHeadmasterUserInTenant(dbName, admin_name, admin_email, admin_password, institute);
+    } catch (err) {
+      console.error('Super Admin createSchool: failed to create headmaster user in tenant DB:', err);
       return errorResponse(
         res,
-        409,
-        'This school or institute conflicts with existing data. Check institute number and try again.',
-        'DUPLICATE_KEY'
+        500,
+        'School created, but failed to create initial Headmaster user. Please configure manually.'
       );
     }
-    return errorResponse(res, 500, 'Failed to register school in master database');
-  }
 
-  try {
-    await createHeadmasterUserInTenant(dbName, admin_name, admin_email, admin_password, institute);
-  } catch (err) {
-    console.error('Super Admin createSchool: failed to create headmaster user in tenant DB:', err);
-    return errorResponse(
-      res,
-      500,
-      'School created, but failed to create initial Headmaster user. Please configure manually.'
-    );
-  }
+    await writeSuperAdminAudit({
+      superAdminId: req.superAdmin?.id,
+      action: 'school_created',
+      resourceType: 'school',
+      resourceId: String(schoolRow.id),
+      details: {
+        school_name: schoolRow.school_name,
+        type: schoolRow.type,
+        institute_number: schoolRow.institute_number,
+      },
+      req,
+    });
 
-  await writeSuperAdminAudit({
-    superAdminId: req.superAdmin?.id,
-    action: 'school_created',
-    resourceType: 'school',
-    resourceId: String(schoolRow.id),
-    details: {
-      school_name: schoolRow.school_name,
-      type: schoolRow.type,
-      institute_number: schoolRow.institute_number,
-    },
-    req,
+    return success(res, 201, 'School created successfully', schoolRow);
   });
-
-  return success(res, 201, 'School created successfully', schoolRow);
 };
 
 /**

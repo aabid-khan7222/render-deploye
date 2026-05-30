@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { superAdminApiService } from '../../core/services/superAdminApiService';
@@ -50,6 +50,7 @@ const SuperAdminSchoolList = () => {
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
+  const createSubmitInFlightRef = useRef(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createForm, setCreateForm] = useState({
     school_name: '',
@@ -97,8 +98,9 @@ const SuperAdminSchoolList = () => {
     setCreateForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateSubmit = async (e?: React.SyntheticEvent) => {
+    e?.preventDefault?.();
+    if (createSubmitInFlightRef.current || creating) return;
     setCreateError(null);
     if (
       !createForm.school_name.trim() ||
@@ -116,6 +118,7 @@ const SuperAdminSchoolList = () => {
       await showPasswordRequirementsAlert(passwordIssue);
       return;
     }
+    createSubmitInFlightRef.current = true;
     setCreating(true);
     try {
       const res = await superAdminApiService.createSchool({
@@ -147,10 +150,30 @@ const SuperAdminSchoolList = () => {
         setCreateError(res.message || 'Failed to create school');
       }
     } catch (e: unknown) {
+      const status = (e as Error & { status?: number }).status;
+      if (status === 400 || status === 409) {
+        try {
+          const listRes = await superAdminApiService.listSchools();
+          const rows =
+            listRes.status === 'SUCCESS' && Array.isArray(listRes.data)
+              ? (listRes.data as School[])
+              : [];
+          const institute = createForm.institute_number.trim();
+          const existing = rows.find((s) => s.institute_number === institute);
+          if (existing?.id) {
+            setShowCreateModal(false);
+            navigate(`/super-admin/schools/${existing.id}`);
+            return;
+          }
+        } catch {
+          /* show error below */
+        }
+      }
       const msg = e instanceof Error ? e.message : 'Failed to create school';
       superAdminToast.error(msg);
       setCreateError(msg);
     } finally {
+      createSubmitInFlightRef.current = false;
       setCreating(false);
     }
   };
