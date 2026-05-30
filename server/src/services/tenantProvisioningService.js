@@ -44,6 +44,36 @@ function requireTenantAdminDatabaseUrl(context) {
   return '';
 }
 
+/**
+ * Neon pooler hostnames (-pooler) cannot run CREATE DATABASE / TEMPLATE / pg_terminate_backend reliably.
+ * Prefer TENANT_ADMIN_DIRECT_DATABASE_URL; otherwise convert pooler URL to the direct endpoint.
+ */
+function resolveDirectAdminConnectionString() {
+  const explicit = (process.env.TENANT_ADMIN_DIRECT_DATABASE_URL || '').toString().trim();
+  if (explicit) return explicit;
+
+  const adminUrl = requireTenantAdminDatabaseUrl('resolveDirectAdminConnectionString');
+  try {
+    const u = new URL(adminUrl);
+    if (u.hostname.includes('-pooler')) {
+      u.hostname = u.hostname.replace('-pooler', '');
+      console.log(
+        '[provisioning] DDL uses direct Postgres endpoint (converted from pooler URL). ' +
+          'Set TENANT_ADMIN_DIRECT_DATABASE_URL to pin the direct connection string from Neon.'
+      );
+      return u.toString();
+    }
+  } catch (err) {
+    console.warn('[provisioning] Could not parse admin URL for direct conversion:', err.message);
+  }
+  return adminUrl;
+}
+
+const PROVISIONING_CONNECTION_TIMEOUT_MS = Math.max(
+  5000,
+  parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '15000', 10) || 15000
+);
+
 let adminPool = null;
 
 /**
@@ -114,6 +144,7 @@ function getAdminPool() {
   if (adminPool) return adminPool;
 
   const adminUrl = requireTenantAdminDatabaseUrl('getAdminPool');
+  const ddlUrl = resolveDirectAdminConnectionString();
   if (adminUrl) {
     const templateName = getTemplateDbName();
     try {
@@ -130,11 +161,11 @@ function getAdminPool() {
       /* URL parse error: continue and use URL as-is */
     }
     adminPool = new Pool({
-      connectionString: adminUrl,
+      connectionString: ddlUrl,
       ssl: sslConfig,
       max: 5,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      connectionTimeoutMillis: PROVISIONING_CONNECTION_TIMEOUT_MS,
     });
     return adminPool;
   }
@@ -142,6 +173,41 @@ function getAdminPool() {
   exitProductionDatabaseConfig(
     '[FATAL] getAdminPool: TENANT_ADMIN_DATABASE_URL or DATABASE_URL is required.'
   );
+}
+
+async function terminateDatabaseBackends(pool, dbName) {
+  await pool.query(
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+    [dbName]
+  );
+}
+
+/**
+ * CREATE DATABASE ... TEMPLATE requires the template DB to have no active sessions.
+ * Retries when Neon/Postgres reports the template is still in use.
+ */
+async function createDatabaseFromTemplate(pool, dbName, templateDbName) {
+  const maxAttempts = Math.min(5, Math.max(1, parseInt(process.env.PROVISIONING_TEMPLATE_CLONE_RETRIES || '3', 10) || 3));
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await terminateDatabaseBackends(pool, templateDbName);
+      await new Promise((r) => setTimeout(r, attempt === 1 ? 800 : 600 * attempt));
+      await pool.query(`CREATE DATABASE "${dbName}" TEMPLATE "${templateDbName}"`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err.message || '');
+      const retryable = /being accessed|in use|template|active sessions/i.test(msg);
+      if (!retryable || attempt === maxAttempts) break;
+      console.warn(
+        `[provisioning] Template clone attempt ${attempt}/${maxAttempts} failed for "${dbName}": ${msg}`
+      );
+    }
+  }
+
+  throw lastErr || new Error(`Failed to clone template "${templateDbName}" into "${dbName}"`);
 }
 
 /**
@@ -667,12 +733,8 @@ async function createTenantDatabase(dbName, schoolName = null) {
     );
   } else if (useTemplateClone && templateDbName) {
     try {
-      await pool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [templateDbName]
-      );
-      await new Promise((r) => setTimeout(r, 400));
-      await pool.query(`CREATE DATABASE "${dbName}" TEMPLATE "${templateDbName}"`);
+      getTemplateSql();
+      await createDatabaseFromTemplate(pool, dbName, templateDbName);
     } catch (err) {
       throw new Error(
         `Failed to create tenant database "${dbName}" from template "${templateDbName}": ${err.message}. ` +
@@ -718,7 +780,7 @@ async function createTenantDatabase(dbName, schoolName = null) {
         }
       }
     } else {
-      getTemplateSql();
+      await ensureTenantDefaultRoles(tenantPool);
     }
 
     // Check if profile exists, if not insert it
@@ -756,19 +818,17 @@ async function createTenantDatabase(dbName, schoolName = null) {
 }
 
 async function dropTenantDatabaseIfExists(dbName) {
-  const adminUrl = requireTenantAdminDatabaseUrl(`dropTenantDatabaseIfExists("${dbName}")`);
+  const ddlUrl = resolveDirectAdminConnectionString();
   const dropPool = new Pool({
-    connectionString: adminUrl,
+    connectionString: ddlUrl,
     ssl: sslConfig,
     max: 1,
     idleTimeoutMillis: 5000,
+    connectionTimeoutMillis: PROVISIONING_CONNECTION_TIMEOUT_MS,
   });
   const client = await dropPool.connect();
   try {
-    await client.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [dbName]
-    );
+    await terminateDatabaseBackends(client, dbName);
     await new Promise((r) => setTimeout(r, 500));
     await client.query(`DROP DATABASE IF EXISTS "${dbName}"`);
   } finally {

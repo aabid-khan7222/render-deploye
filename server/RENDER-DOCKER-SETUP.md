@@ -7,7 +7,9 @@
 ## Env vars (zaruri)
 
 - `DATABASE_URL` → neondb (main app DB)
-- `TENANT_ADMIN_DATABASE_URL` → neondb (same)
+- `TENANT_ADMIN_DATABASE_URL` → neondb (pooled URL is fine for app queries)
+- `TENANT_ADMIN_DIRECT_DATABASE_URL` → neondb **direct** endpoint (recommended; otherwise pooler host is auto-converted for DDL)
+- `PROVISIONING_USE_DB_TEMPLATE_CLONE=true`
 - `PROVISIONING_TEMPLATE_DB_NAME` → school_template
 - `MASTER_DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGIN`, etc.
 - `SCHOOL_LOGO_STORAGE_ROOT` → persistent disk path, e.g. `/var/data/myschool/school-logos`
