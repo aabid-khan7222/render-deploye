@@ -7,6 +7,14 @@ const {
   ensureParentContactUser,
   ensureGuardianContactUser,
 } = require('./contactUserService');
+const { ROLES } = require('../config/roles');
+
+/** Lower rank = preferred stored relation when slots collapse to one users.id */
+const RELATION_TYPE_RANK = {
+  father: 0,
+  mother: 1,
+  guardian: 2,
+};
 
 async function guardiansIsSlimSchema(client) {
   const r = await client.query(
@@ -32,21 +40,34 @@ function splitFullName(fullName, fallbackFirstName = '') {
 /**
  * When father/mother/guardian resolve to the same users.id, only one link row
  * must be inserted (student_guardian_links is unique on student_id + guardian_id).
+ * Stored relation prefers father > mother > guardian so parent list/grid can resolve
+ * contacts; primary-contact flag is tracked separately via isPrimaryContact.
  */
-function dedupeGuardianRowsByUserId(rows, primaryType) {
+function dedupeGuardianRowsByUserId(rows, primaryContactType) {
   const byUid = new Map();
   for (const row of rows) {
     const uid = Number(row.uid);
     if (!Number.isFinite(uid) || uid <= 0) continue;
     const existing = byUid.get(uid);
     if (existing) {
-      if (primaryType && row.type === primaryType) {
+      const existingRank = RELATION_TYPE_RANK[existing.type] ?? 99;
+      const rowRank = RELATION_TYPE_RANK[row.type] ?? 99;
+      if (rowRank < existingRank) {
         existing.type = row.type;
         existing.rel = row.rel;
       }
+      if (primaryContactType && row.type === primaryContactType) {
+        existing.isPrimaryContact = true;
+      }
       continue;
     }
-    byUid.set(uid, { ...row, uid });
+    byUid.set(uid, {
+      ...row,
+      uid,
+      isPrimaryContact: Boolean(
+        primaryContactType ? row.type === primaryContactType : rows.length === 1
+      ),
+    });
   }
   return Array.from(byUid.values());
 }
@@ -451,14 +472,14 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   }
 
   const rowsBeforeDedupe = rows.length;
-  const primaryType = guardianUserId
+  const primaryContactType = guardianUserId
     ? 'guardian'
     : fatherUserId
       ? 'father'
       : motherUserId
         ? 'mother'
         : null;
-  const dedupedRows = dedupeGuardianRowsByUserId(rows, primaryType);
+  const dedupedRows = dedupeGuardianRowsByUserId(rows, primaryContactType);
   if (warnings && rowsBeforeDedupe > dedupedRows.length) {
     warnings.push({
       message:
@@ -469,7 +490,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   let primaryId = null;
   const linkedGuardianIds = new Set();
   for (const row of dedupedRows) {
-    const isPrimary = primaryType ? row.type === primaryType : dedupedRows.length === 1;
+    const isPrimary = Boolean(row.isPrimaryContact);
     let ins;
     if (slim) {
       const insG = await client.query(
@@ -679,8 +700,25 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
-          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
-        ORDER BY sgl.id ASC
+          AND (
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+            OR (
+              u.role_id = ${ROLES.PARENT}
+              AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('mother', 'mom', 'mummy', 'ammi')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM student_guardian_links sgl_f
+                WHERE sgl_f.student_id = s.id
+                  AND LOWER(BTRIM(COALESCE(sgl_f.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+              )
+            )
+          )
+        ORDER BY
+          CASE
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 0
+            ELSE 1
+          END,
+          sgl.id ASC
         LIMIT 1
       ) father_u ON true
       LEFT JOIN LATERAL (
@@ -699,6 +737,7 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
+          AND u.role_id <> ${ROLES.PARENT}
           AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
         ORDER BY sgl.id ASC
         LIMIT 1
