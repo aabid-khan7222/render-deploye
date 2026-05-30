@@ -30,6 +30,28 @@ function splitFullName(fullName, fallbackFirstName = '') {
 }
 
 /**
+ * When father/mother/guardian resolve to the same users.id, only one link row
+ * must be inserted (student_guardian_links is unique on student_id + guardian_id).
+ */
+function dedupeGuardianRowsByUserId(rows, primaryType) {
+  const byUid = new Map();
+  for (const row of rows) {
+    const uid = Number(row.uid);
+    if (!Number.isFinite(uid) || uid <= 0) continue;
+    const existing = byUid.get(uid);
+    if (existing) {
+      if (primaryType && row.type === primaryType) {
+        existing.type = row.type;
+        existing.rel = row.rel;
+      }
+      continue;
+    }
+    byUid.set(uid, { ...row, uid });
+  }
+  return Array.from(byUid.values());
+}
+
+/**
  * Map guardian rows + users to legacy API field names for forms.
  */
 function mapGuardianRowsToLegacyFields(rows) {
@@ -428,11 +450,26 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     });
   }
 
-  const primaryType = guardianUserId ? 'guardian' : fatherUserId ? 'father' : motherUserId ? 'mother' : null;
+  const rowsBeforeDedupe = rows.length;
+  const primaryType = guardianUserId
+    ? 'guardian'
+    : fatherUserId
+      ? 'father'
+      : motherUserId
+        ? 'mother'
+        : null;
+  const dedupedRows = dedupeGuardianRowsByUserId(rows, primaryType);
+  if (warnings && rowsBeforeDedupe > dedupedRows.length) {
+    warnings.push({
+      message:
+        'Some contact slots (Father, Mother, Guardian) referred to the same person. A single guardian link was created.',
+    });
+  }
 
   let primaryId = null;
-  for (const row of rows) {
-    const isPrimary = primaryType ? row.type === primaryType : rows.length === 1;
+  const linkedGuardianIds = new Set();
+  for (const row of dedupedRows) {
+    const isPrimary = primaryType ? row.type === primaryType : dedupedRows.length === 1;
     let ins;
     if (slim) {
       const insG = await client.query(
@@ -444,11 +481,32 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
         [row.uid, null]
       );
       const gid = insG.rows[0].id;
+
+      if (linkedGuardianIds.has(gid)) {
+        if (isPrimary) {
+          await client.query(
+            `UPDATE student_guardian_links
+             SET is_primary_contact = true, updated_at = NOW()
+             WHERE student_id = $1 AND guardian_id = $2`,
+            [studentId, gid]
+          );
+          primaryId = gid;
+        }
+        continue;
+      }
+      linkedGuardianIds.add(gid);
+
       ins = await client.query(
         `INSERT INTO student_guardian_links (
           student_id, guardian_id, relation, is_primary_contact, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, NOW(), NOW())
-        RETURNING id`,
+        ON CONFLICT (student_id, guardian_id) DO UPDATE SET
+          relation = EXCLUDED.relation,
+          is_primary_contact = (
+            student_guardian_links.is_primary_contact OR EXCLUDED.is_primary_contact
+          ),
+          updated_at = NOW()
+        RETURNING id, guardian_id`,
         [studentId, gid, row.rel, isPrimary]
       );
     } else {
@@ -513,9 +571,9 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
         ]
       );
     }
-    if (isPrimary) primaryId = ins.rows[0].id;
+    if (isPrimary) primaryId = ins.rows[0].guardian_id ?? ins.rows[0].id;
   }
-  if (!primaryId && rows.length > 0) {
+  if (!primaryId && dedupedRows.length > 0) {
     const firstG = await client.query(
       `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
       [studentId]
@@ -648,6 +706,7 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
 
 module.exports = {
   guardiansIsSlimSchema,
+  dedupeGuardianRowsByUserId,
   loadStudentContactLegacyFields,
   loadStudentLinkedUserIds,
   mapGuardianRowsToLegacyFields,
