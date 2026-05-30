@@ -727,8 +727,41 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
-          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
-        ORDER BY sgl.id ASC
+          AND (
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+            OR (
+              u.role_id = ${ROLES.PARENT}
+              AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM student_guardian_links sgl_m
+                WHERE sgl_m.student_id = s.id
+                  AND LOWER(BTRIM(COALESCE(sgl_m.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM student_guardian_links sgl_f
+                WHERE sgl_f.student_id = s.id
+                  AND (
+                    LOWER(BTRIM(COALESCE(sgl_f.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+                    OR EXISTS (
+                      SELECT 1
+                      FROM guardians g_f
+                      INNER JOIN users u_f ON u_f.id = g_f.user_id
+                      WHERE g_f.id = sgl_f.guardian_id
+                        AND u_f.role_id = ${ROLES.PARENT}
+                        AND sgl_f.id <> sgl.id
+                    )
+                  )
+              )
+            )
+          )
+        ORDER BY
+          CASE
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi') THEN 0
+            ELSE 1
+          END,
+          sgl.id ASC
         LIMIT 1
       ) mother_u ON true
       LEFT JOIN LATERAL (
@@ -743,9 +776,211 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         LIMIT 1
       ) gu_u ON true`;
 
+function classifyGuardianLinkRelation(relation) {
+  const r = String(relation || '').toLowerCase().trim();
+  if (['father', 'dad', 'papa', 'abbu'].includes(r)) return 'father';
+  if (['mother', 'mom', 'mummy', 'ammi'].includes(r)) return 'mother';
+  return 'guardian';
+}
+
+function isBlankContactValue(value) {
+  return value == null || (typeof value === 'string' && value.trim() === '');
+}
+
+function buildContactFullName(firstName, lastName) {
+  return [firstName, lastName].filter(Boolean).join(' ').trim();
+}
+
+function applyGuardianLinkToParentRow(row, link, slot) {
+  const out = { ...row };
+  const name = buildContactFullName(link.first_name, link.last_name);
+  if (slot === 'father') {
+    if (isBlankContactValue(out.father_name) && name) out.father_name = name;
+    if (isBlankContactValue(out.father_person_id) && link.user_id) out.father_person_id = link.user_id;
+    if (isBlankContactValue(out.father_email) && link.email) out.father_email = link.email;
+    if (isBlankContactValue(out.father_phone) && link.phone) out.father_phone = link.phone;
+    if (isBlankContactValue(out.father_occupation) && link.occupation) out.father_occupation = link.occupation;
+    if (isBlankContactValue(out.father_image_url) && link.avatar) out.father_image_url = link.avatar;
+    if (isBlankContactValue(out.father_user_id) && link.user_id) out.father_user_id = link.user_id;
+  } else if (slot === 'mother') {
+    if (isBlankContactValue(out.mother_name) && name) out.mother_name = name;
+    if (isBlankContactValue(out.mother_person_id) && link.user_id) out.mother_person_id = link.user_id;
+    if (isBlankContactValue(out.mother_email) && link.email) out.mother_email = link.email;
+    if (isBlankContactValue(out.mother_phone) && link.phone) out.mother_phone = link.phone;
+    if (isBlankContactValue(out.mother_occupation) && link.occupation) out.mother_occupation = link.occupation;
+    if (isBlankContactValue(out.mother_image_url) && link.avatar) out.mother_image_url = link.avatar;
+  }
+  return out;
+}
+
+function enrichParentRowFromGuardianLinks(row, links) {
+  if (!Array.isArray(links) || links.length === 0) return row;
+  let out = { ...row };
+  const needsFather = isBlankContactValue(out.father_name);
+  const needsMother = isBlankContactValue(out.mother_name);
+  if (!needsFather && !needsMother) return out;
+
+  const explicitFather = links.find((l) => classifyGuardianLinkRelation(l.relation) === 'father');
+  const explicitMother = links.find((l) => classifyGuardianLinkRelation(l.relation) === 'mother');
+  if (needsFather && explicitFather) out = applyGuardianLinkToParentRow(out, explicitFather, 'father');
+  if (needsMother && explicitMother) out = applyGuardianLinkToParentRow(out, explicitMother, 'mother');
+
+  const stillNeedsFather = isBlankContactValue(out.father_name);
+  const stillNeedsMother = isBlankContactValue(out.mother_name);
+  if (!stillNeedsFather && !stillNeedsMother) return out;
+
+  const parentRoleLinks = links.filter((l) => Number(l.role_id) === ROLES.PARENT);
+  const usedUserIds = new Set(
+    [out.father_person_id, out.father_user_id, out.mother_person_id]
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+
+  if (stillNeedsFather) {
+    const fatherFallback =
+      parentRoleLinks.find((l) => !usedUserIds.has(Number(l.user_id))) || parentRoleLinks[0];
+    if (fatherFallback) {
+      out = applyGuardianLinkToParentRow(out, fatherFallback, 'father');
+      usedUserIds.add(Number(fatherFallback.user_id));
+    }
+  }
+
+  if (isBlankContactValue(out.mother_name)) {
+    const motherFallback = parentRoleLinks.find((l) => !usedUserIds.has(Number(l.user_id)));
+    if (motherFallback) out = applyGuardianLinkToParentRow(out, motherFallback, 'mother');
+  }
+
+  return out;
+}
+
+/**
+ * Resolve parent display fields from guardian links when SQL laterals miss (legacy misclassified relations).
+ */
+async function enrichParentRowsFromGuardianLinks(rows, queryFn) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const studentIds = [
+    ...new Set(rows.map((row) => Number(row.student_id)).filter((id) => Number.isFinite(id) && id > 0)),
+  ];
+  if (!studentIds.length) return rows;
+
+  const linkResult = await queryFn(
+    `SELECT
+       sgl.student_id,
+       sgl.relation,
+       sgl.is_primary_contact,
+       g.user_id,
+       u.first_name,
+       u.last_name,
+       u.email,
+       u.phone,
+       u.occupation,
+       u.avatar,
+       u.role_id
+     FROM student_guardian_links sgl
+     INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
+     INNER JOIN users u ON u.id = g.user_id
+     WHERE sgl.student_id = ANY($1::int[])
+     ORDER BY sgl.student_id ASC, sgl.id ASC`,
+    [studentIds]
+  );
+
+  const linksByStudent = new Map();
+  for (const link of linkResult.rows) {
+    const sid = Number(link.student_id);
+    if (!linksByStudent.has(sid)) linksByStudent.set(sid, []);
+    linksByStudent.get(sid).push(link);
+  }
+
+  return rows.map((row) =>
+    enrichParentRowFromGuardianLinks(row, linksByStudent.get(Number(row.student_id)) || [])
+  );
+}
+
+/**
+ * One-time repair: relabel misclassified guardian links for Parent-role users (Father/Mother).
+ * Safe to run multiple times; only updates rows missing explicit father/mother relations.
+ */
+async function repairMisclassifiedParentLinkRelations(client) {
+  const fatherPass = await client.query(
+    `UPDATE student_guardian_links sgl
+     SET relation = 'Father', updated_at = NOW()
+     FROM guardians g
+     INNER JOIN users u ON u.id = g.user_id
+     WHERE g.id = sgl.guardian_id
+       AND COALESCE(g.is_active, true) = true
+       AND u.role_id = $1
+       AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM student_guardian_links sgl_f
+         WHERE sgl_f.student_id = sgl.student_id
+           AND sgl_f.id <> sgl.id
+           AND LOWER(BTRIM(COALESCE(sgl_f.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+       )
+       AND sgl.id = (
+         SELECT sgl_pick.id
+         FROM student_guardian_links sgl_pick
+         INNER JOIN guardians g_pick ON g_pick.id = sgl_pick.guardian_id
+         INNER JOIN users u_pick ON u_pick.id = g_pick.user_id
+         WHERE sgl_pick.student_id = sgl.student_id
+           AND u_pick.role_id = $1
+           AND LOWER(BTRIM(COALESCE(sgl_pick.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+         ORDER BY sgl_pick.id ASC
+         LIMIT 1
+       )`,
+    [ROLES.PARENT]
+  );
+
+  const motherPass = await client.query(
+    `UPDATE student_guardian_links sgl
+     SET relation = 'Mother', updated_at = NOW()
+     FROM guardians g
+     INNER JOIN users u ON u.id = g.user_id
+     WHERE g.id = sgl.guardian_id
+       AND COALESCE(g.is_active, true) = true
+       AND u.role_id = $1
+       AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+       AND EXISTS (
+         SELECT 1
+         FROM student_guardian_links sgl_f
+         WHERE sgl_f.student_id = sgl.student_id
+           AND LOWER(BTRIM(COALESCE(sgl_f.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM student_guardian_links sgl_m
+         WHERE sgl_m.student_id = sgl.student_id
+           AND sgl_m.id <> sgl.id
+           AND LOWER(BTRIM(COALESCE(sgl_m.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+       )
+       AND sgl.id = (
+         SELECT sgl_pick.id
+         FROM student_guardian_links sgl_pick
+         INNER JOIN guardians g_pick ON g_pick.id = sgl_pick.guardian_id
+         INNER JOIN users u_pick ON u_pick.id = g_pick.user_id
+         WHERE sgl_pick.student_id = sgl.student_id
+           AND u_pick.role_id = $1
+           AND LOWER(BTRIM(COALESCE(sgl_pick.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+           AND LOWER(BTRIM(COALESCE(sgl_pick.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu')
+         ORDER BY sgl_pick.id ASC
+         LIMIT 1
+       )`,
+    [ROLES.PARENT]
+  );
+
+  return {
+    fatherLinksRepaired: fatherPass.rowCount || 0,
+    motherLinksRepaired: motherPass.rowCount || 0,
+  };
+}
+
 module.exports = {
   guardiansIsSlimSchema,
   dedupeGuardianRowsByUserId,
+  classifyGuardianLinkRelation,
+  enrichParentRowFromGuardianLinks,
+  enrichParentRowsFromGuardianLinks,
+  repairMisclassifiedParentLinkRelations,
   loadStudentContactLegacyFields,
   loadStudentLinkedUserIds,
   mapGuardianRowsToLegacyFields,

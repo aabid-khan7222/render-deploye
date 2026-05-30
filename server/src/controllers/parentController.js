@@ -20,8 +20,9 @@ const {
   guardiansIsSlimSchema,
   STUDENT_CONTACT_LATERAL_SELECT,
   STUDENT_CONTACT_LATERAL_JOINS,
+  enrichParentRowsFromGuardianLinks,
 } = require('../utils/studentContactSync');
-const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
+const { lateralCurrentEnrollment, buildEnrollmentJoin } = require('../utils/studentEnrollmentSql');
 
 function isBlankValue(value) {
   return value == null || (typeof value === 'string' && value.trim() === '');
@@ -87,6 +88,14 @@ async function enrichRowsWithLegacyParentContacts(rows) {
   return rows.map((row) => mergeLegacyParentContact(row, legacyByStudent.get(parseId(row.student_id))));
 }
 
+async function enrichParentListRows(rows, client = null) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const q = client ? client.query.bind(client) : query;
+  let enriched = await enrichRowsWithLegacyParentContacts(rows);
+  enriched = await enrichParentRowsFromGuardianLinks(enriched, q);
+  return enriched;
+}
+
 async function fetchParentRowByStudentId(studentId, client = null) {
   const q = client ? client.query.bind(client) : query;
   const sql = `
@@ -114,7 +123,7 @@ async function fetchParentRowByStudentId(studentId, client = null) {
   const r = await q(sql, [studentId]);
   const baseRow = r.rows[0] || null;
   if (!baseRow) return null;
-  const enrichedRows = await enrichRowsWithLegacyParentContacts([baseRow]);
+  const enrichedRows = await enrichParentListRows([baseRow], client);
   return enrichedRows[0] || baseRow;
 }
 
@@ -409,19 +418,34 @@ const parentListSelectSql = `
             g.id ASC
           LIMIT 1) AS father_user_id`;
 
-const parentListJoins = `
+const parentListJoins = (enrollmentJoinSql) => `
         FROM students s
         LEFT JOIN users u ON s.user_id = u.id
-        ${lateralCurrentEnrollment('s.id')}
+        ${enrollmentJoinSql}
         LEFT JOIN classes c ON enr.class_id = c.id
         LEFT JOIN sections sec ON enr.section_id = sec.id
         ${STUDENT_CONTACT_LATERAL_JOINS}`;
 
 const getAllParents = async (req, res) => {
   try {
-    const { page, limit, offset } = parsePagination(req.query);
     const academicYearId = req.query.academic_year_id ? parseInt(req.query.academic_year_id, 10) : null;
     const hasYearFilter = academicYearId != null && !Number.isNaN(academicYearId);
+
+    let page;
+    let limit;
+    let offset;
+    if (hasYearFilter) {
+      page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const rawLimit = parseInt(req.query.limit, 10);
+      limit =
+        Number.isNaN(rawLimit) || rawLimit < 1
+          ? 5000
+          : Math.min(10000, rawLimit);
+      offset = (page - 1) * limit;
+    } else {
+      ({ page, limit, offset } = parsePagination(req.query));
+    }
+
     const ctx = getAuthContext(req);
     const isTeacher = ctx.roleId === ROLES.TEACHER || ctx.roleName === 'teacher';
     const isAdm = isAdmin(ctx);
@@ -454,34 +478,41 @@ const getAllParents = async (req, res) => {
         )`;
     }
 
-    const yearIdx = queryParams.length + 1;
-    const yearWhere = hasYearFilter ? ` AND enr.academic_year_id = $${yearIdx}` : '';
-    const countParams = hasYearFilter ? [...queryParams, academicYearId] : queryParams;
-    const listParams = hasYearFilter ? [...queryParams, academicYearId, limit, offset] : [...queryParams, limit, offset];
-    const limitOffsetIdx = hasYearFilter ? [yearIdx + 1, yearIdx + 2] : [yearIdx, yearIdx + 1];
+    const joinParams = [...queryParams];
+    const enrollmentJoinSql = buildEnrollmentJoin(
+      's.id',
+      joinParams,
+      hasYearFilter ? academicYearId : null
+    );
+    const enrollmentWhere = hasYearFilter ? ' AND enr.academic_year_id IS NOT NULL' : '';
+
+    const countParams = [...joinParams];
+    const listParams = [...joinParams, limit, offset];
+    const limitIdx = joinParams.length + 1;
+    const offsetIdx = joinParams.length + 2;
 
     const countResult = await query(
       `SELECT COUNT(*)::int as total
        FROM students s
-       ${lateralCurrentEnrollment('s.id')}
+       ${enrollmentJoinSql}
        WHERE s.status = 'Active'
          AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
-         ${scopingSql}${yearWhere}`,
+         ${scopingSql}${enrollmentWhere}`,
       countParams
     );
 
     const result = await query(
       `SELECT ${parentListSelectSql}
-       ${parentListJoins}
+       ${parentListJoins(enrollmentJoinSql)}
        WHERE s.status = 'Active'
          AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
-         ${scopingSql}${yearWhere}
+         ${scopingSql}${enrollmentWhere}
        ORDER BY u.first_name ASC, u.last_name ASC
-       LIMIT $${limitOffsetIdx[0]} OFFSET $${limitOffsetIdx[1]}`,
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       listParams
     );
 
-    const enrichedRows = await enrichRowsWithLegacyParentContacts(result.rows);
+    const enrichedRows = await enrichParentListRows(result.rows);
 
     // Group by family identity to avoid duplicate cards for the same parents
     const grouped = [];
