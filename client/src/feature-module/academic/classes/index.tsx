@@ -1,4 +1,6 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from "react";
+import { Dropdown } from "antd";
+import type { MenuProps } from "antd";
 import { exportToExcel, exportToPDF, printData } from "../../../core/utils/exportUtils";
 import { useClassesWithSections } from "../../../core/hooks/useClassesWithSections";
 import { useTeachers } from "../../../core/hooks/useTeachers";
@@ -162,6 +164,7 @@ const Classes = () => {
   }, [editingRow]);
 
   useEffect(() => {
+    cleanupBootstrapModalArtifacts();
     return () => {
       if (notificationTimeoutRef.current) {
         clearTimeout(notificationTimeoutRef.current);
@@ -193,23 +196,19 @@ const Classes = () => {
     }, 5000);
   };
 
-  const handleEditClick = (record: EditRow) => {
+  const openEditModal = useCallback((record: EditRow) => {
     setEditingRow(record);
-    const el = document.getElementById("edit_class");
-    if (el) {
-      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(el);
-      if (modal) modal.show();
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
     }
-  };
+    window.setTimeout(() => {
+      showBootstrapModal(editModalRef.current);
+    }, 0);
+  }, []);
 
   const closeEditModalAndCleanup = () => {
-    const el = document.getElementById("edit_class");
-    if (el) {
-      const modal = (window as any).bootstrap?.Modal?.getInstance(el);
-      if (modal) modal.hide();
-    }
+    hideBootstrapModal(editModalRef.current);
     setEditingRow(null);
-    cleanupModalBackdrops();
   };
 
   const handleEditSave = async (e: React.MouseEvent) => {
@@ -314,13 +313,48 @@ const Classes = () => {
     }
   };
 
-  const openDeleteModal = (record: EditRow) => {
+  const openDeleteModal = useCallback((record: EditRow) => {
     setSelectedDeleteRow(record);
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
-    showBootstrapModal(deleteModalRef.current);
-  };
+    window.setTimeout(() => {
+      showBootstrapModal(deleteModalRef.current);
+    }, 0);
+  }, []);
+
+  const buildRowActionMenu = useCallback(
+    (record: EditRow): MenuProps => ({
+      items: [
+        {
+          key: "edit",
+          label: (
+            <span className="d-inline-flex align-items-center">
+              <i className="ti ti-edit-circle me-2" />
+              Edit
+            </span>
+          ),
+        },
+        {
+          key: "delete",
+          label: (
+            <span className="d-inline-flex align-items-center">
+              <i className="ti ti-trash-x me-2" />
+              Delete
+            </span>
+          ),
+          danger: true,
+        },
+      ],
+      onClick: ({ key, domEvent }) => {
+        domEvent.preventDefault();
+        domEvent.stopPropagation();
+        if (key === "edit") openEditModal(record);
+        else if (key === "delete") openDeleteModal(record);
+      },
+    }),
+    [openEditModal, openDeleteModal]
+  );
 
   const handleDelete = async () => {
     if (!selectedDeleteRow?.classId) return;
@@ -474,7 +508,8 @@ const Classes = () => {
     printData("Classes", exportColumns, exportRows);
   }, [exportRows, exportColumns]);
 
-  const columns = [
+  const columns = useMemo(
+    () => [
     {
       title: "ID",
       dataIndex: "id",
@@ -521,52 +556,28 @@ const Classes = () => {
       title: "Action",
       dataIndex: "action",
       render: (_: any, record: any) => (
-        <>
-          <div className="d-flex align-items-center">
-            <div className="dropdown">
-              <Link
-                to="#"
-                className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
-                data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
-                aria-expanded="false"
-              >
-                <i className="ti ti-dots-vertical fs-14" />
-              </Link>
-              <ul className="dropdown-menu dropdown-menu-end p-2">
-                <li>
-                  <Link
-                    className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleEditClick(record as EditRow);
-                    }}
-                  >
-                    <i className="ti ti-edit-circle me-2" />
-                    Edit
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      openDeleteModal(record as EditRow);
-                    }}
-                  >
-                    <i className="ti ti-trash-x me-2" />
-                    Delete
-                  </Link>
-                </li>
-              </ul>
-            </div>
-          </div>
-        </>
+        <div className="d-flex align-items-center classes-table-action">
+          <Dropdown
+            menu={buildRowActionMenu(record as EditRow)}
+            trigger={["click"]}
+            placement="bottomRight"
+            getPopupContainer={(trigger) => trigger.parentElement || document.body}
+          >
+            <button
+              type="button"
+              className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0 border-0"
+              aria-label="Class actions"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <i className="ti ti-dots-vertical fs-14" />
+            </button>
+          </Dropdown>
+        </div>
       ),
     },
-  ];
+  ],
+    [buildRowActionMenu]
+  );
 
   // Show loading state
   if (loading) {
