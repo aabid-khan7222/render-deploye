@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/verify-dist.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "test:e2e:events-calendar": "playwright test -c playwright.events-calendar.config.ts"

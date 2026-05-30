@@ -25,17 +25,26 @@ If you have more than one frontend URL, set:
 
 ---
 
-## 2. Static Site (Frontend) – Environment
+## 2. Static Site (Frontend) – Render settings
 
-In Render → your **Static Site** → **Environment**, set:
+In Render → your **Static Site** → **Settings**, use exactly:
+
+| Setting | Value | Notes |
+|---------|--------|--------|
+| **Root Directory** | `client` | Build runs inside `client/` |
+| **Build Command** | `npm install && npm run build` | Produces `client/dist/` (Vite) |
+| **Publish Directory** | `dist` | Relative to Root Directory → `client/dist` |
+| **Rewrite rule** | `/*` → `/index.html` | Required for React Router SPA |
+
+**Do not** set Publish Directory to `client`, repo root, or `./client/dist` from repo root unless Root Directory is empty. Wrong publish path causes a blank page: `index.html` loads but hashed `/assets/index-*.js` returns 404.
+
+Optional environment:
 
 | Key | Value | Notes |
 |-----|--------|--------|
-| `VITE_API_URL` | `https://YOUR-WEB-SERVICE-URL.onrender.com/api` | Optional at build time. The app uses `public/config.json` in production for the API URL; set this if you want the build to use a different URL. |
+| `VITE_API_URL` | `https://webschool-backend-yly0.onrender.com/api` | Build-time fallback only. Runtime API URL comes from `public/config.json`. |
 
-Replace `YOUR-WEB-SERVICE-URL` with your actual Web Service host (e.g. `myschool-abc123` → `https://myschool-abc123.onrender.com/api`).
-
-After changing env, run **Manual Deploy** on the Static Site (build must run again to pick up `VITE_API_URL`).
+After changing settings, run **Manual Deploy** on the Static Site.
 
 ---
 

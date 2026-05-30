@@ -40,8 +40,14 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = resolveApiProxyTarget(mode, cwd)
 
   return {
+    // Render static site is served from domain root (https://webschool-ovrs.onrender.com).
+    // Absolute /assets/* paths in dist/index.html are correct for this layout.
+    base: '/',
     plugins: [react()],
     build: {
+      outDir: 'dist',
+      assetsDir: 'assets',
+      emptyOutDir: true,
       minify: 'esbuild',
     },
     server: {
