@@ -1,6 +1,6 @@
 const { query, executeTransaction } = require('../config/database');
 const { createGuardianUser } = require('../utils/createPersonUser');
-const { guardiansIsSlimSchema } = require('../utils/studentContactSync');
+const { guardiansIsSlimSchema, sqlParentGuardianLinkMatch } = require('../utils/studentContactSync');
 const { deleteFileIfExist } = require('../utils/fileDeleteHelper');
 const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
 const { getAuthContext, isAdmin, parseId, canAccessStudent } = require('../utils/accessControl');
@@ -383,7 +383,7 @@ const getAllGuardians = async (req, res) => {
       `SELECT ${guardianSelectBase}
       ${guardianJoins}
       WHERE ${guardianListStudentWhereSql} ${scopingSql}${yearWhere}
-        AND LOWER(COALESCE(sgl.relation::text, '')) NOT IN ('father', 'mother')
+        AND NOT (${sqlParentGuardianLinkMatch('sgl', 'u')})
       ORDER BY student_u.first_name ASC, student_u.last_name ASC`,
       listParams
     );

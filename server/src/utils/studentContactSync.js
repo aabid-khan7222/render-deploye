@@ -53,6 +53,37 @@ function splitFullName(fullName, fallbackFirstName = '') {
 /**
  * Map guardian rows + users to legacy API field names for forms.
  */
+/** Relation values treated as father on parent screens and link sync. */
+const FATHER_RELATION_VALUES = ['father', 'dad', 'papa', 'abbu', 'parent', 'parents'];
+/** Relation values treated as mother on parent screens and link sync. */
+const MOTHER_RELATION_VALUES = ['mother', 'mom', 'mummy', 'ammi'];
+
+function normalizeRelationKey(relation) {
+  return String(relation ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function isFatherRelation(relation) {
+  return FATHER_RELATION_VALUES.includes(normalizeRelationKey(relation));
+}
+
+function isMotherRelation(relation) {
+  return MOTHER_RELATION_VALUES.includes(normalizeRelationKey(relation));
+}
+
+/**
+ * SQL: student_guardian_links row is a parent-type contact (father/mother or Parent role user).
+ */
+function sqlParentGuardianLinkMatch(sglRef = 'sgl', uRef = 'u') {
+  const fatherList = FATHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+  const motherList = MOTHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+  return `(
+    LOWER(BTRIM(COALESCE(${sglRef}.relation::text, ''))) IN (${fatherList}, ${motherList})
+    OR ${uRef}.role_id = ${ROLES.PARENT}
+  )`;
+}
+
 function mapGuardianRowsToLegacyFields(rows) {
   const out = {
     father_name: '',
@@ -76,12 +107,13 @@ function mapGuardianRowsToLegacyFields(rows) {
     const ln = (row.last_name || '').toString().trim();
     const name = [fn, ln].filter(Boolean).join(' ').trim();
     const gt = (row.guardian_type || '').toString().toLowerCase();
-    if (gt === 'father') {
+    const relKey = normalizeRelationKey(row.relation);
+    if (gt === 'father' || isFatherRelation(relKey)) {
       out.father_name = name;
       out.father_email = row.email || '';
       out.father_phone = row.phone || '';
       out.father_occupation = row.occupation || '';
-    } else if (gt === 'mother') {
+    } else if (gt === 'mother' || isMotherRelation(relKey)) {
       out.mother_name = name;
       out.mother_email = row.email || '';
       out.mother_phone = row.phone || '';
@@ -105,11 +137,13 @@ function mapGuardianRowsToLegacyFields(rows) {
  */
 async function loadStudentContactLegacyFields(query, studentId) {
   const readFromUnifiedGuardians = async () => {
+    const fatherIn = FATHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+    const motherIn = MOTHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
     const linkSql = `
       SELECT
         CASE
-          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 'father'
-          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi') THEN 'mother'
+          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${fatherIn}) THEN 'father'
+          WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${motherIn}) THEN 'mother'
           WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('guardian', 'legal guardian', 'other') THEN 'guardian'
           ELSE LOWER(BTRIM(COALESCE(sgl.relation::text, '')))
         END AS guardian_type,
@@ -341,7 +375,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   // --- End cross-entity duplicate email check ---
 
   if (hasFather) {
-    fatherUserId = await ensureParentContactUser(
+    const ensuredFather = await ensureParentContactUser(
       client,
       {
         id: fatherUserId,
@@ -353,9 +387,20 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
       warnings,
       'Father'
     );
+    fatherUserId = ensuredFather ?? fatherUserId;
+    if (
+      !fatherUserId &&
+      (effFatherName || effFatherEmail || effFatherPhone || effFatherOcc)
+    ) {
+      const err = new Error(
+        'Father contact could not be linked. Check that email/phone are not already used by another account.'
+      );
+      err.statusCode = 409;
+      throw err;
+    }
   }
   if (hasMother) {
-    motherUserId = await ensureParentContactUser(
+    const ensuredMother = await ensureParentContactUser(
       client,
       {
         id: motherUserId,
@@ -367,9 +412,20 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
       warnings,
       'Mother'
     );
+    motherUserId = ensuredMother ?? motherUserId;
+    if (
+      !motherUserId &&
+      (effMotherName || effMotherEmail || effMotherPhone || effMotherOcc)
+    ) {
+      const err = new Error(
+        'Mother contact could not be linked. Check that email/phone are not already used by another account.'
+      );
+      err.statusCode = 409;
+      throw err;
+    }
   }
   if (hasG) {
-    guardianUserId = await ensureGuardianContactUser(
+    const ensuredGuardian = await ensureGuardianContactUser(
       client,
       {
         id: guardianUserId,
@@ -382,6 +438,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
       },
       warnings
     );
+    guardianUserId = ensuredGuardian ?? guardianUserId;
   }
 
   // Final duplicate-email guard:
@@ -743,19 +800,16 @@ async function upsertLegacyParentsRow(
   );
 }
 
-/** SQL fragment: student has father/mother contact via guardian links (and optionally legacy parents row). */
+/** SQL fragment: student has father/mother contact via guardian links (optional legacy parents row). */
 function parentContactExistsSql(studentIdRef = 's.id', opts = {}) {
-  const includeLegacy = opts.includeLegacy !== false;
+  const includeLegacy = opts.includeLegacy === true;
   const linkExists = `EXISTS (
       SELECT 1
       FROM student_guardian_links sgl2
       INNER JOIN guardians g2 ON g2.id = sgl2.guardian_id AND COALESCE(g2.is_active, true) = true
       INNER JOIN users u2 ON u2.id = g2.user_id
       WHERE sgl2.student_id = ${studentIdRef}
-        AND (
-          LOWER(BTRIM(COALESCE(sgl2.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
-          OR u2.role_id = ${ROLES.PARENT}
-        )
+        AND ${sqlParentGuardianLinkMatch('sgl2', 'u2')}
     )`;
   if (!includeLegacy) return linkExists;
   return `(
@@ -852,6 +906,10 @@ const STUDENT_CONTACT_LATERAL_SELECT = `
       gu_u.avatar AS guardian_image_url`;
 
 /** Canonical schema: links live on student_guardian_links; guardians has no student_id. */
+const fatherRelationSqlIn = FATHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+const motherRelationSqlIn = MOTHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+const parentNonMotherRelationSqlIn = FATHER_RELATION_VALUES.map((v) => `'${v}'`).join(', ');
+
 const STUDENT_CONTACT_LATERAL_JOINS = `
       LEFT JOIN LATERAL (
         SELECT u.id AS user_id, u.first_name, u.last_name, u.email, u.phone, u.occupation, u.avatar
@@ -860,12 +918,12 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
           AND (
-            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${fatherRelationSqlIn})
             OR u.role_id = ${ROLES.PARENT}
           )
         ORDER BY
           CASE
-            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 0
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${fatherRelationSqlIn}) THEN 0
             WHEN u.role_id = ${ROLES.PARENT} THEN 1
             ELSE 2
           END,
@@ -879,15 +937,15 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
           AND (
-            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${motherRelationSqlIn})
             OR (
               u.role_id = ${ROLES.PARENT}
-              AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu')
+              AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN (${parentNonMotherRelationSqlIn})
             )
           )
         ORDER BY
           CASE
-            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi') THEN 0
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN (${motherRelationSqlIn}) THEN 0
             WHEN u.role_id = ${ROLES.PARENT} THEN 1
             ELSE 2
           END,
@@ -900,7 +958,7 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
-          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+          AND NOT (${sqlParentGuardianLinkMatch('sgl', 'u')})
         ORDER BY sgl.id ASC
         LIMIT 1
       ) gu_u ON true`;
@@ -1024,6 +1082,11 @@ module.exports = {
   upsertLegacyParentsRow,
   runOptionalLegacyStatement,
   parentContactExistsSql,
+  sqlParentGuardianLinkMatch,
+  FATHER_RELATION_VALUES,
+  MOTHER_RELATION_VALUES,
+  isFatherRelation,
+  isMotherRelation,
   STUDENT_CONTACT_LATERAL_SELECT,
   STUDENT_CONTACT_LATERAL_JOINS,
 };

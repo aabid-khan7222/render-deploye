@@ -68,7 +68,7 @@ async function ensureParentContactUser(client, { id, full_name, email, phone, oc
   const { isUserEmailTaken, parseFullName, findUserRowByEmail } = require('./createPersonUser');
   const e = String(email ?? '').trim();
   const p = String(phone ?? '').trim();
-  const fn = String(full_name ?? '').trim();
+  let fn = String(full_name ?? '').trim();
 
   // 1. If we have an ID, we are updating an EXISTING linked user
   if (id) {
@@ -103,7 +103,10 @@ async function ensureParentContactUser(client, { id, full_name, email, phone, oc
     }
   }
 
-  if (!e && !p && !fn) return null;
+  if (!e && !p && !fn) {
+    if (!occupation) return null;
+    fn = String(warnLabel || 'Parent').trim();
+  }
 
   // 2. Try to reuse existing Parent by phone or email
   const existing = await findUserIdByPhoneOrEmail(client, ROLES.PARENT, p, e);
