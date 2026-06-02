@@ -429,10 +429,43 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   }
 
   const primaryType = guardianUserId ? 'guardian' : fatherUserId ? 'father' : motherUserId ? 'mother' : null;
+  const rolePriority = { mother: 1, father: 2, guardian: 3 };
+  const dedupedRows = [];
+  const rowByUserId = new Map();
+
+  for (const row of rows) {
+    const key = Number(row.uid);
+    if (!rowByUserId.has(key)) {
+      const next = { ...row };
+      rowByUserId.set(key, next);
+      dedupedRows.push(next);
+      continue;
+    }
+
+    const existing = rowByUserId.get(key);
+    const existingScore =
+      existing.type === primaryType ? 100 : (rolePriority[existing.type] || 0);
+    const incomingScore =
+      row.type === primaryType ? 100 : (rolePriority[row.type] || 0);
+
+    // Keep exactly one link per user; choose the row with stronger role precedence.
+    if (incomingScore > existingScore) {
+      existing.type = row.type;
+      existing.rel = row.rel;
+    }
+  }
+
+  if (warnings && dedupedRows.length !== rows.length) {
+    warnings.push({
+      code: 'GUARDIAN_LINK_DEDUPED',
+      message:
+        'Duplicate contact mapping detected for guardian links. Reused contact was linked only once to prevent duplicate records.',
+    });
+  }
 
   let primaryId = null;
-  for (const row of rows) {
-    const isPrimary = primaryType ? row.type === primaryType : rows.length === 1;
+  for (const row of dedupedRows) {
+    const isPrimary = primaryType ? row.type === primaryType : dedupedRows.length === 1;
     let ins;
     if (slim) {
       const insG = await client.query(
@@ -448,6 +481,11 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
         `INSERT INTO student_guardian_links (
           student_id, guardian_id, relation, is_primary_contact, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+        ON CONFLICT (student_id, guardian_id)
+        DO UPDATE SET
+          relation = EXCLUDED.relation,
+          is_primary_contact = EXCLUDED.is_primary_contact,
+          updated_at = NOW()
         RETURNING id`,
         [studentId, gid, row.rel, isPrimary]
       );
@@ -515,7 +553,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
     if (isPrimary) primaryId = ins.rows[0].id;
   }
-  if (!primaryId && rows.length > 0) {
+  if (!primaryId && dedupedRows.length > 0) {
     const firstG = await client.query(
       `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
       [studentId]
