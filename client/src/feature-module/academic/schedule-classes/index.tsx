@@ -160,7 +160,6 @@ const ScheduleClasses = () => {
   const data = loading ? fallbackData : (apiData ?? fallbackData ?? []);
   const route = all_routes;
   const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
-  const editModalRef = useRef<HTMLDivElement | null>(null);
   const [editingRow, setEditingRow] = useState<EditRow | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -203,6 +202,8 @@ const ScheduleClasses = () => {
     includeBreaks: false,
     breaks: [{ afterPeriod: 2, duration: 15 }],
   });
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
   useEffect(() => {
     if (editingRow) {
@@ -215,6 +216,23 @@ const ScheduleClasses = () => {
       });
     }
   }, [editingRow]);
+
+  // Ensure body scrolling / backdrop state is sane for React-controlled modals
+  useEffect(() => {
+    const hasOpen = isEditModalOpen || isDeleteModalOpen;
+    if (hasOpen) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+      document.body.style.removeProperty("overflow");
+      document.body.style.removeProperty("padding-right");
+    }
+    return () => {
+      document.body.classList.remove("modal-open");
+      document.body.style.removeProperty("overflow");
+      document.body.style.removeProperty("padding-right");
+    };
+  }, [isEditModalOpen, isDeleteModalOpen]);
 
   useEffect(() => {
     const modalIds = ["delete-modal", "add_Schedule", "edit_Schedule"];
@@ -238,15 +256,11 @@ const ScheduleClasses = () => {
   const handleEditClick = (record: EditRow) => {
     setEditingRow(record);
     setSaveError(null);
-    const el = document.getElementById("edit_Schedule");
-    if (el) {
-      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(el);
-      if (modal) modal.show();
-    }
+    setIsEditModalOpen(true);
   };
 
   const closeEditModalAndCleanup = () => {
-    hideBootstrapModalById("edit_Schedule");
+    setIsEditModalOpen(false);
     setEditingRow(null);
     setSaveError(null);
   };
@@ -417,7 +431,7 @@ const ScheduleClasses = () => {
         return;
       }
       await refetch();
-      hideBootstrapModalById("delete-modal");
+      setIsDeleteModalOpen(false);
       setSelectedDeleteId(null);
       setSelectedRowKeys([]);
     } catch (err: any) {
@@ -607,39 +621,26 @@ const ScheduleClasses = () => {
       title: "Action",
       dataIndex: "action",
       render: (_: any, record: any) => (
-        <div className="dropdown">
-          <Link
-            to="#"
-            className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
-            data-bs-toggle="dropdown"
-            aria-expanded="false"
+        <div className="d-flex align-items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-outline-primary btn-sm"
+            onClick={() => handleEditClick(record)}
           >
-            <i className="ti ti-dots-vertical fs-14" />
-          </Link>
-          <ul className="dropdown-menu dropdown-menu-end p-2">
-            <li>
-              <Link
-                className="dropdown-item rounded-1"
-                to="#"
-                onClick={() => handleEditClick(record)}
-              >
-                <i className="ti ti-edit-circle me-2" />
-                Edit
-              </Link>
-            </li>
-            <li>
-              <Link
-                className="dropdown-item rounded-1"
-                to="#"
-                data-bs-toggle="modal"
-                data-bs-target="#delete-modal"
-                onClick={() => setSelectedDeleteId(record.originalData?.id ?? record.id)}
-              >
-                <i className="ti ti-trash-x me-2" />
-                Delete
-              </Link>
-            </li>
-          </ul>
+            <i className="ti ti-edit-circle me-1" />
+            Edit
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline-danger btn-sm"
+            onClick={() => {
+              setSelectedDeleteId(record.originalData?.id ?? record.id);
+              setIsDeleteModalOpen(true);
+            }}
+          >
+            <i className="ti ti-trash-x me-1" />
+            Delete
+          </button>
         </div>
       ),
     },
@@ -795,9 +796,10 @@ const ScheduleClasses = () => {
                   <button
                     type="button"
                     className="btn btn-danger btn-sm"
-                    data-bs-toggle="modal"
-                    data-bs-target="#delete-modal"
-                    onClick={() => setSelectedDeleteId(null)}
+                    onClick={() => {
+                      setSelectedDeleteId(null);
+                      setIsDeleteModalOpen(true);
+                    }}
                   >
                     Delete Selected
                   </button>
@@ -914,7 +916,13 @@ const ScheduleClasses = () => {
       {/* /Add Schedule Modal */}
 
       {/* Edit Schedule Modal */}
-      <div className="modal fade" id="edit_Schedule" ref={editModalRef}>
+      <div
+        className={`modal fade ${isEditModalOpen ? "show d-block" : ""}`}
+        id="edit_Schedule"
+        aria-hidden={!isEditModalOpen}
+        role="dialog"
+        style={{ zIndex: 1060 }}
+      >
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
@@ -922,7 +930,6 @@ const ScheduleClasses = () => {
               <button
                 type="button"
                 className="btn-close custom-btn-close"
-                data-bs-dismiss="modal"
                 aria-label="Close"
                 onClick={closeEditModalAndCleanup}
               >
@@ -1008,7 +1015,6 @@ const ScheduleClasses = () => {
                 <button
                   type="button"
                   className="btn btn-light me-2"
-                  data-bs-dismiss="modal"
                   onClick={closeEditModalAndCleanup}
                 >
                   Cancel
@@ -1024,7 +1030,13 @@ const ScheduleClasses = () => {
       {/* /Edit Schedule Modal */}
 
       {/* Delete Schedule Modal */}
-      <div className="modal fade" id="delete-modal">
+      <div
+        className={`modal fade ${isDeleteModalOpen ? "show d-block" : ""}`}
+        id="delete-modal"
+        aria-hidden={!isDeleteModalOpen}
+        role="dialog"
+        style={{ zIndex: 1060 }}
+      >
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <form>
@@ -1039,9 +1051,16 @@ const ScheduleClasses = () => {
                 </h4>
                 <p>This action cannot be undone and will remove the selected slot(s) permanently.</p>
                 <div className="d-flex justify-content-center">
-                  <Link to="#" className="btn btn-light me-3" data-bs-dismiss="modal">
+                  <button
+                    type="button"
+                    className="btn btn-light me-3"
+                    onClick={() => {
+                      setIsDeleteModalOpen(false);
+                      setSelectedDeleteId(null);
+                    }}
+                  >
                     Cancel
-                  </Link>
+                  </button>
                   <button type="button" className="btn btn-danger" onClick={handleDeleteSchedule} disabled={saving}>
                     {saving ? "Deleting..." : "Yes, Delete"}
                   </button>
