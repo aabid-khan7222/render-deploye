@@ -847,6 +847,29 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         LIMIT 1
       ) gu_u ON true`;
 
+/** Missing legacy table/column — safe to skip when tenants differ in schema generation. */
+const SCHEMA_OPTIONAL_PG_CODES = new Set(['42P01', '42703']);
+
+/**
+ * Run SQL inside an open transaction without aborting the whole block on optional
+ * schema drift (catch in Node alone leaves PostgreSQL txn in 25P02 state).
+ */
+async function runOptionalLegacyStatement(client, savepointName, sql, params) {
+  const sp = String(savepointName).replace(/[^a-zA-Z0-9_]/g, '_');
+  await client.query(`SAVEPOINT ${sp}`);
+  try {
+    const result = await client.query(sql, params);
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    return result;
+  } catch (err) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    if (SCHEMA_OPTIONAL_PG_CODES.has(String(err?.code || ''))) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 /**
  * Detach guardian/parent contacts when a student is soft-deleted.
  * Removes links for this student only; shared contacts for other active students are kept.
@@ -855,11 +878,12 @@ async function cleanupStudentContactsOnDelete(client, studentId) {
   const sid = parseInt(studentId, 10);
   if (!Number.isFinite(sid) || sid <= 0) return;
 
-  try {
-    await client.query('DELETE FROM parents WHERE student_id = $1', [sid]);
-  } catch (err) {
-    if (String(err?.code || '') !== '42P01') throw err;
-  }
+  await runOptionalLegacyStatement(
+    client,
+    'sp_cleanup_parents',
+    'DELETE FROM parents WHERE student_id = $1',
+    [sid]
+  );
 
   const linkedRes = await client.query(
     `SELECT DISTINCT g.id AS guardian_id, g.user_id
@@ -878,14 +902,12 @@ async function cleanupStudentContactsOnDelete(client, studentId) {
     [sid]
   );
 
-  try {
-    await client.query(
-      `UPDATE guardians SET is_active = false, updated_at = NOW() WHERE student_id = $1`,
-      [sid]
-    );
-  } catch (err) {
-    if (String(err?.code || '') !== '42703') throw err;
-  }
+  await runOptionalLegacyStatement(
+    client,
+    'sp_cleanup_guardians_student',
+    `UPDATE guardians SET is_active = false, updated_at = NOW() WHERE student_id = $1`,
+    [sid]
+  );
 
   if (guardianIds.length) {
     await client.query(
