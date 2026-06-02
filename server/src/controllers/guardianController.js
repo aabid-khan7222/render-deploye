@@ -36,6 +36,8 @@ const guardianJoins = `
       LEFT JOIN classes c ON enr.class_id = c.id
       LEFT JOIN sections sec ON enr.section_id = sec.id`;
 
+const guardianListStudentWhereSql = `s.deleted_at IS NULL AND COALESCE(s.status, 'Active') = 'Active'`;
+
 const createGuardian = async (req, res) => {
   try {
     const {
@@ -380,7 +382,7 @@ const getAllGuardians = async (req, res) => {
     const result = await query(
       `SELECT ${guardianSelectBase}
       ${guardianJoins}
-      WHERE s.status = 'Active' ${scopingSql}${yearWhere}
+      WHERE ${guardianListStudentWhereSql} ${scopingSql}${yearWhere}
         AND LOWER(COALESCE(sgl.relation::text, '')) NOT IN ('father', 'mother')
       ORDER BY student_u.first_name ASC, student_u.last_name ASC`,
       listParams
@@ -451,7 +453,7 @@ const getGuardianById = async (req, res) => {
     const result = await query(
       `SELECT ${guardianSelectBase}
       ${guardianJoins}
-      WHERE g.id = $1 AND s.status = 'Active'`,
+      WHERE g.id = $1 AND ${guardianListStudentWhereSql}`,
       [gid]
     );
 
@@ -506,7 +508,7 @@ const getCurrentGuardian = async (req, res) => {
     const result = await query(
       `SELECT ${guardianSelectBase}
       ${guardianJoins}
-      WHERE g.user_id = $1 AND (s.status IS NULL OR s.status = 'Active')
+      WHERE g.user_id = $1 AND (s.id IS NULL OR (${guardianListStudentWhereSql}))
       ORDER BY sgl.is_primary_contact DESC, student_u.first_name ASC NULLS LAST, student_u.last_name ASC NULLS LAST`,
       [userId]
     );
@@ -541,7 +543,7 @@ const getGuardianByStudentId = async (req, res) => {
     const result = await query(
       `SELECT ${guardianSelectBase}
       ${guardianJoins}
-      WHERE sgl.student_id = $1 AND s.status = 'Active'
+      WHERE sgl.student_id = $1 AND ${guardianListStudentWhereSql}
       ORDER BY sgl.is_primary_contact DESC, g.updated_at DESC, g.id DESC`,
       [studentId]
     );

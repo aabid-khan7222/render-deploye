@@ -109,7 +109,7 @@ async function fetchParentRowByStudentId(studentId, client = null) {
     LEFT JOIN classes c ON enr.class_id = c.id
     LEFT JOIN sections sec ON enr.section_id = sec.id
     ${STUDENT_CONTACT_LATERAL_JOINS}
-    WHERE s.id = $1 AND s.status = \'Active\'
+    WHERE s.id = $1 AND s.deleted_at IS NULL AND COALESCE(s.status, 'Active') = 'Active'
     LIMIT 1`;
   const r = await q(sql, [studentId]);
   const baseRow = r.rows[0] || null;

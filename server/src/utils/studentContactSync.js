@@ -708,6 +708,83 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         LIMIT 1
       ) gu_u ON true`;
 
+/**
+ * Detach guardian/parent contacts when a student is soft-deleted.
+ * Removes links for this student only; shared contacts for other active students are kept.
+ */
+async function cleanupStudentContactsOnDelete(client, studentId) {
+  const sid = parseInt(studentId, 10);
+  if (!Number.isFinite(sid) || sid <= 0) return;
+
+  try {
+    await client.query('DELETE FROM parents WHERE student_id = $1', [sid]);
+  } catch (err) {
+    if (String(err?.code || '') !== '42P01') throw err;
+  }
+
+  const linkedRes = await client.query(
+    `SELECT DISTINCT g.id AS guardian_id, g.user_id
+     FROM student_guardian_links sgl
+     INNER JOIN guardians g ON g.id = sgl.guardian_id
+     WHERE sgl.student_id = $1`,
+    [sid]
+  );
+  const guardianIds = linkedRes.rows.map((row) => row.guardian_id).filter(Boolean);
+  const userIds = [...new Set(linkedRes.rows.map((row) => row.user_id).filter(Boolean))];
+
+  await client.query('DELETE FROM student_guardian_links WHERE student_id = $1', [sid]);
+
+  await client.query(
+    `UPDATE students SET guardian_id = NULL, updated_at = NOW() WHERE id = $1`,
+    [sid]
+  );
+
+  try {
+    await client.query(
+      `UPDATE guardians SET is_active = false, updated_at = NOW() WHERE student_id = $1`,
+      [sid]
+    );
+  } catch (err) {
+    if (String(err?.code || '') !== '42703') throw err;
+  }
+
+  if (guardianIds.length) {
+    await client.query(
+      `UPDATE guardians g
+       SET is_active = false, updated_at = NOW()
+       WHERE g.id = ANY($1::int[])
+         AND NOT EXISTS (
+           SELECT 1
+           FROM student_guardian_links sgl
+           INNER JOIN students s ON s.id = sgl.student_id
+           WHERE sgl.guardian_id = g.id
+             AND s.deleted_at IS NULL
+         )`,
+      [guardianIds]
+    );
+  }
+
+  if (userIds.length) {
+    await client.query(
+      `UPDATE users u
+       SET is_active = false,
+           deleted_at = COALESCE(u.deleted_at, NOW()),
+           updated_at = NOW()
+       WHERE u.id = ANY($1::int[])
+         AND u.role_id IN ($2, $3)
+         AND NOT EXISTS (
+           SELECT 1
+           FROM student_guardian_links sgl
+           INNER JOIN guardians g ON g.id = sgl.guardian_id
+           INNER JOIN students s ON s.id = sgl.student_id
+           WHERE g.user_id = u.id
+             AND s.deleted_at IS NULL
+         )`,
+      [userIds, ROLES.PARENT, ROLES.GUARDIAN]
+    );
+  }
+}
+
 module.exports = {
   guardiansIsSlimSchema,
   loadStudentContactLegacyFields,
@@ -715,6 +792,7 @@ module.exports = {
   mapGuardianRowsToLegacyFields,
   resolveLinkedUser,
   syncStudentGuardians,
+  cleanupStudentContactsOnDelete,
   STUDENT_CONTACT_LATERAL_SELECT,
   STUDENT_CONTACT_LATERAL_JOINS,
 };

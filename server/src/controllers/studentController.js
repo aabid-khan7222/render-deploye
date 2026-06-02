@@ -11,6 +11,7 @@ const {
 } = require('../utils/createPersonUser');
 const {
   syncStudentGuardians,
+  cleanupStudentContactsOnDelete,
   resolveLinkedUser,
   loadStudentContactLegacyFields,
   loadStudentLinkedUserIds,
@@ -5561,7 +5562,7 @@ const deleteStudent = async (req, res) => {
       // 1. Mark student as deleted
       const stuUpdate = await client.query(
         `UPDATE students 
-         SET deleted_at = NOW(), updated_at = NOW() 
+         SET deleted_at = NOW(), status = 'Inactive', updated_at = NOW() 
          WHERE id = $1 AND deleted_at IS NULL 
          RETURNING id, user_id`,
         [sid]
@@ -5584,6 +5585,9 @@ const deleteStudent = async (req, res) => {
           [user_id]
         );
       }
+
+      // 3. Remove guardian/parent links; deactivate contacts only tied to this student
+      await cleanupStudentContactsOnDelete(client, sid);
 
       return sid;
     });
