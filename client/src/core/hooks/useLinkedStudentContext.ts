@@ -32,6 +32,14 @@ const parseStudentId = (value: unknown) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const normalizeStudentPayload = (response: any) => {
+  const payload = response?.data ?? response;
+  if (payload && typeof payload === "object" && payload.student && typeof payload.student === "object") {
+    return payload.student;
+  }
+  return payload && typeof payload === "object" ? payload : null;
+};
+
 export const useLinkedStudentContext = ({
   locationState,
   routeStudentId,
@@ -224,8 +232,8 @@ export const useLinkedStudentContext = ({
       .getStudentById(resolvedStudentId)
       .then((res: any) => {
         if (cancelled) return;
-        const nextStudent = res?.data ?? null;
-        setStudent(nextStudent && typeof nextStudent === "object" ? nextStudent : null);
+        const nextStudent = normalizeStudentPayload(res);
+        setStudent(nextStudent);
       })
       .catch((err: unknown) => {
         if (cancelled) return;

@@ -924,8 +924,16 @@ const AddStudent = () => {
         return;
       }
 
-      // Navigate to student list only on clean success (no warnings)
-      navigate(routes.studentList);
+      // After successful update, open the student's details page so UI always reflects
+      // the latest backend record instead of relying on any stale navigation state.
+      if (isEdit && id) {
+        navigate(`${routes.studentDetail}/${id}`, {
+          state: { studentId: Number(id) },
+          replace: true,
+        });
+      } else {
+        navigate(routes.studentList);
+      }
     } catch (error: any) {
       console.error('Error saving student:', error);
       // 409 = conflict (email/phone) — show a clear modal and stay on the form
