@@ -302,8 +302,12 @@ class ApiService {
   }
 
   // Sections
-  async getSections() {
-    return this.makeRequest('/sections');
+  async getSections(academicYearId = null) {
+    const q =
+      academicYearId != null && String(academicYearId).trim() !== ''
+        ? `?academic_year_id=${encodeURIComponent(String(academicYearId))}`
+        : '';
+    return this.makeRequest(`/sections${q}`);
   }
 
   async getSectionById(id) {
@@ -1491,8 +1495,13 @@ class ApiService {
     return this.makeRequest('/teachers/me');
   }
 
-  async getTeacherById(id) {
-    return this.makeRequest(`/teachers/${id}`);
+  async getTeacherById(id, params = {}) {
+    const searchParams = new URLSearchParams();
+    if (params.academicYearId != null && params.academicYearId !== '') {
+      searchParams.set('academicYearId', String(params.academicYearId));
+    }
+    const qs = searchParams.toString();
+    return this.makeRequest(`/teachers/${id}${qs ? `?${qs}` : ''}`);
   }
 
   async getTeachersByClass(classId) {
