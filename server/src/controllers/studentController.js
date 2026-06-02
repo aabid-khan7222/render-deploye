@@ -12,6 +12,7 @@ const {
 const {
   syncStudentGuardians,
   cleanupStudentContactsOnDelete,
+  runOptionalLegacyStatement,
   resolveLinkedUser,
   loadStudentContactLegacyFields,
   loadStudentLinkedUserIds,
@@ -159,7 +160,9 @@ async function upsertStudentTransportAllocation(client, studentId, studentAcadem
   const isFree = Boolean(transportPayload?.is_free);
   const isRequired = Boolean(transportPayload?.is_transport_required);
   if (!isRequired) {
-    await client.query(
+    await runOptionalLegacyStatement(
+      client,
+      'sp_student_transport_deactivate',
       `UPDATE transport_allocations
        SET status = 'Inactive',
            end_date = CURRENT_DATE,
@@ -638,24 +641,22 @@ const createStudent = async (req, res) => {
         }
       }
 
-      // 3. Sync current & permanent address into users table
+      // 3. Sync current & permanent address into users table (optional columns / schema drift)
       if (studentRow.user_id && (current_address || permanent_address || addrVal)) {
-        try {
-          await client.query(
-            `UPDATE users SET
+        await runOptionalLegacyStatement(
+          client,
+          'sp_create_student_user_address',
+          `UPDATE users SET
               current_address = COALESCE($1, current_address),
               permanent_address = COALESCE($2, permanent_address),
               updated_at = NOW()
             WHERE id = $3`,
-            [
-              current_address || addrVal || null,
-              permanent_address || null,
-              studentRow.user_id
-            ]
-          );
-        } catch (ae) {
-          console.warn('createStudent: could not sync user address fields:', ae.message);
-        }
+          [
+            current_address || addrVal || null,
+            permanent_address || null,
+            studentRow.user_id,
+          ]
+        );
       }
 
       await upsertStudentTransportAllocation(client, Number(studentRow.id), Number(studentRow.academic_year_id || academic_year_id || 0), {
@@ -1318,24 +1319,22 @@ const updateStudent = async (req, res) => {
         }
       }
 
-      // Sync current & permanent address into users table
+      // Sync current & permanent address into users table (optional columns / schema drift)
       if (studentRow.user_id && (current_address || permanent_address || addrVal)) {
-        try {
-          await client.query(
-            `UPDATE users SET
+        await runOptionalLegacyStatement(
+          client,
+          'sp_update_student_user_address',
+          `UPDATE users SET
               current_address = COALESCE($1, current_address),
               permanent_address = COALESCE($2, permanent_address),
               updated_at = NOW()
             WHERE id = $3`,
-            [
-              current_address || addrVal || null,
-              permanent_address || null,
-              studentRow.user_id
-            ]
-          );
-        } catch (ae) {
-          console.warn('updateStudent: could not sync user address fields:', ae.message);
-        }
+          [
+            current_address || addrVal || null,
+            permanent_address || null,
+            studentRow.user_id,
+          ]
+        );
       }
 
       // Sync medical record: Clear existing and re-insert

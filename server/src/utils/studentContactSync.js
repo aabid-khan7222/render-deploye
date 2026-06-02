@@ -429,7 +429,6 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     });
   }
 
-  const primaryType = guardianUserId ? 'guardian' : fatherUserId ? 'father' : motherUserId ? 'mother' : null;
   // When the same user is linked as father/mother and guardian, keep father/mother relation
   // so parent list/detail queries (relation-based) still resolve correctly.
   const rolePriority = { guardian: 1, mother: 2, father: 3 };
@@ -464,6 +463,18 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     });
   }
 
+  const dedupedTypes = new Set(dedupedRows.map((r) => r.type));
+  let primaryType = null;
+  if (guardianUserId && dedupedTypes.has('guardian')) {
+    primaryType = 'guardian';
+  } else if (fatherUserId && dedupedTypes.has('father')) {
+    primaryType = 'father';
+  } else if (motherUserId && dedupedTypes.has('mother')) {
+    primaryType = 'mother';
+  } else if (dedupedRows.length === 1) {
+    primaryType = dedupedRows[0].type;
+  }
+
   let primaryId = null;
   for (const row of dedupedRows) {
     const isPrimary = primaryType ? row.type === primaryType : dedupedRows.length === 1;
@@ -490,6 +501,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
         RETURNING id`,
         [studentId, gid, row.rel, isPrimary]
       );
+      if (isPrimary) primaryId = gid;
     } else {
       const userRes = await client.query(
         `SELECT first_name, last_name, phone, email, occupation, current_address
@@ -551,15 +563,35 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
           occupation,
         ]
       );
+      if (isPrimary) primaryId = ins.rows[0].id;
     }
-    if (isPrimary) primaryId = ins.rows[0].id;
   }
   if (!primaryId && dedupedRows.length > 0) {
-    const firstG = await client.query(
-      `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
-      [studentId]
+    if (slim) {
+      const firstG = await client.query(
+        `SELECT g.id
+         FROM student_guardian_links sgl
+         INNER JOIN guardians g ON g.id = sgl.guardian_id
+         WHERE sgl.student_id = $1
+         ORDER BY sgl.is_primary_contact DESC, sgl.id ASC
+         LIMIT 1`,
+        [studentId]
+      );
+      primaryId = firstG.rows[0]?.id || null;
+    } else {
+      const firstG = await client.query(
+        `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
+        [studentId]
+      );
+      primaryId = firstG.rows[0]?.id || null;
+    }
+  }
+
+  if (primaryId) {
+    await client.query(
+      `UPDATE students SET guardian_id = $1, updated_at = NOW() WHERE id = $2`,
+      [primaryId, studentId]
     );
-    primaryId = firstG.rows[0]?.id || null;
   }
 
   if (primaryId && !slim) {
@@ -625,14 +657,19 @@ async function upsertLegacyParentsRow(
 
   const primaryUserId = fatherUserId || motherUserId || null;
 
-  try {
-    const existing = await client.query(
-      `SELECT id FROM parents WHERE student_id = $1 ORDER BY id DESC LIMIT 1`,
-      [studentId]
-    );
-    if (existing.rows.length > 0) {
-      await client.query(
-        `UPDATE parents SET
+  const existing = await runOptionalLegacyStatement(
+    client,
+    'sp_parents_lookup',
+    `SELECT id FROM parents WHERE student_id = $1 ORDER BY id DESC LIMIT 1`,
+    [studentId]
+  );
+  if (!existing) return;
+
+  if (existing.rows.length > 0) {
+    await runOptionalLegacyStatement(
+      client,
+      'sp_parents_update',
+      `UPDATE parents SET
           father_name = COALESCE(NULLIF(TRIM($2::text), ''), father_name),
           father_email = COALESCE(NULLIF(TRIM($3::text), ''), father_email),
           father_phone = COALESCE(NULLIF(TRIM($4::text), ''), father_phone),
@@ -644,45 +681,43 @@ async function upsertLegacyParentsRow(
           user_id = COALESCE($10, user_id),
           updated_at = NOW()
         WHERE student_id = $1`,
-        [
-          studentId,
-          effFatherName,
-          effFatherEmail,
-          effFatherPhone,
-          effFatherOcc,
-          effMotherName,
-          effMotherEmail,
-          effMotherPhone,
-          effMotherOcc,
-          primaryUserId,
-        ]
-      );
-      return;
-    }
+      [
+        studentId,
+        effFatherName,
+        effFatherEmail,
+        effFatherPhone,
+        effFatherOcc,
+        effMotherName,
+        effMotherEmail,
+        effMotherPhone,
+        effMotherOcc,
+        primaryUserId,
+      ]
+    );
+    return;
+  }
 
-    await client.query(
-      `INSERT INTO parents (
+  await runOptionalLegacyStatement(
+    client,
+    'sp_parents_insert',
+    `INSERT INTO parents (
         student_id, father_name, father_email, father_phone, father_occupation,
         mother_name, mother_email, mother_phone, mother_occupation, user_id,
         created_at, updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())`,
-      [
-        studentId,
-        effFatherName || null,
-        effFatherEmail || null,
-        effFatherPhone || null,
-        effFatherOcc || null,
-        effMotherName || null,
-        effMotherEmail || null,
-        effMotherPhone || null,
-        effMotherOcc || null,
-        primaryUserId,
-      ]
-    );
-  } catch (err) {
-    if (String(err?.code || '') === '42P01') return;
-    throw err;
-  }
+    [
+      studentId,
+      effFatherName || null,
+      effFatherEmail || null,
+      effFatherPhone || null,
+      effFatherOcc || null,
+      effMotherName || null,
+      effMotherEmail || null,
+      effMotherPhone || null,
+      effMotherOcc || null,
+      primaryUserId,
+    ]
+  );
 }
 
 /** SQL fragment: student has father/mother contact via guardian links (and optionally legacy parents row). */
@@ -955,6 +990,7 @@ module.exports = {
   syncStudentGuardians,
   cleanupStudentContactsOnDelete,
   upsertLegacyParentsRow,
+  runOptionalLegacyStatement,
   parentContactExistsSql,
   STUDENT_CONTACT_LATERAL_SELECT,
   STUDENT_CONTACT_LATERAL_JOINS,
