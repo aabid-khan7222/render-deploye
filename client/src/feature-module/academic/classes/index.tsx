@@ -115,6 +115,35 @@ const Classes = () => {
     }, 150);
   };
 
+  const closeModalSafely = (modalId: string) => {
+    const modalEl = document.getElementById(modalId);
+    if (!modalEl) return;
+
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+
+    const dismissBtn = modalEl.querySelector('[data-bs-dismiss="modal"]') as HTMLElement | null;
+    if (dismissBtn) {
+      dismissBtn.click();
+      cleanupModalBackdrops();
+      return;
+    }
+
+    const bs = (window as any).bootstrap?.Modal;
+    const modal = bs?.getInstance(modalEl) ?? bs?.getOrCreateInstance?.(modalEl);
+    if (modal?.hide) {
+      modal.hide();
+    } else {
+      modalEl.classList.remove("show");
+      modalEl.setAttribute("aria-hidden", "true");
+      modalEl.removeAttribute("aria-modal");
+      modalEl.removeAttribute("role");
+      (modalEl as HTMLElement).style.display = "none";
+    }
+    cleanupModalBackdrops();
+  };
+
   const showNotification = (msg: string, type: "success" | "danger" | "info" = "info") => {
     setMessage(msg);
     setMessageType(type);
@@ -128,21 +157,11 @@ const Classes = () => {
 
   const handleEditClick = (record: EditRow) => {
     setEditingRow(record);
-    const el = document.getElementById("edit_class");
-    if (el) {
-      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(el);
-      if (modal) modal.show();
-    }
   };
 
   const closeEditModalAndCleanup = () => {
-    const el = document.getElementById("edit_class");
-    if (el) {
-      const modal = (window as any).bootstrap?.Modal?.getInstance(el);
-      if (modal) modal.hide();
-    }
+    closeModalSafely("edit_class");
     setEditingRow(null);
-    cleanupModalBackdrops();
   };
 
   const handleEditSave = async (e: React.MouseEvent) => {
@@ -223,12 +242,7 @@ const Classes = () => {
 
       // Close modal first
       const addEl = document.getElementById("add_class");
-      if (addEl) {
-        const bs = (window as any).bootstrap?.Modal;
-        const modal = bs?.getInstance(addEl) ?? bs?.getOrCreateInstance(addEl);
-        modal?.hide();
-      }
-      cleanupModalBackdrops();
+      if (addEl) closeModalSafely("add_class");
 
       // Clear form and show success
       setAddForm({
@@ -256,22 +270,10 @@ const Classes = () => {
       await refetch();
       showNotification("Deleted successfully", "success");
       setSelectedDeleteRow(null);
-      const delEl = document.getElementById("delete-modal");
-      if (delEl) {
-        const bs = (window as any).bootstrap?.Modal;
-        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
-        modal?.hide();
-      }
-      cleanupModalBackdrops();
+      closeModalSafely("delete-modal");
     } catch {
       showNotification("Failed to delete record", "danger");
-      const delEl = document.getElementById("delete-modal");
-      if (delEl) {
-        const bs = (window as any).bootstrap?.Modal;
-        const modal = bs?.getInstance(delEl) ?? bs?.getOrCreateInstance(delEl);
-        modal?.hide();
-      }
-      cleanupModalBackdrops();
+      closeModalSafely("delete-modal");
     } finally {
       setDeleting(false);
     }
@@ -452,37 +454,34 @@ const Classes = () => {
                 className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
                 data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
                 aria-expanded="false"
+                onClick={(e) => e.preventDefault()}
               >
                 <i className="ti ti-dots-vertical fs-14" />
               </Link>
               <ul className="dropdown-menu dropdown-menu-end p-2">
                 <li>
-                  <Link
+                  <button
+                    type="button"
                     className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleEditClick(record as EditRow);
-                    }}
+                    data-bs-toggle="modal"
+                    data-bs-target="#edit_class"
+                    onClick={() => handleEditClick(record as EditRow)}
                   >
                     <i className="ti ti-edit-circle me-2" />
                     Edit
-                  </Link>
+                  </button>
                 </li>
                 <li>
-                  <Link
+                  <button
+                    type="button"
                     className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setSelectedDeleteRow(record as EditRow);
-                      const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("delete-modal"));
-                      modal?.show();
-                    }}
+                    data-bs-toggle="modal"
+                    data-bs-target="#delete-modal"
+                    onClick={() => setSelectedDeleteRow(record as EditRow)}
                   >
                     <i className="ti ti-trash-x me-2" />
                     Delete
-                  </Link>
+                  </button>
                 </li>
               </ul>
             </div>
