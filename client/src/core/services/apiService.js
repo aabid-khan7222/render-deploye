@@ -80,6 +80,61 @@ function shouldGlobalSessionExpireOn401(requestUrl) {
 }
 
 class ApiService {
+  getPhotoFieldKeys() {
+    return new Set([
+      'photo_url',
+      'avatar',
+      'img',
+      'image',
+      'student_photo_url',
+      'student_image_url',
+      'applicant_photo_url',
+      'borrower_photo',
+      'recipient_photo_url',
+      'sender_photo_url',
+      'teacherPhotoUrl',
+      'photoUrl',
+      'studentImage',
+    ]);
+  }
+
+  async normalizePhotoFieldsInResponse(payload, requestUrl) {
+    if (payload == null || typeof payload !== 'object') return payload;
+    const visited = new WeakSet();
+    const photoKeys = this.getPhotoFieldKeys();
+    const shouldResolve = (k, v) =>
+      typeof v === 'string' &&
+      v.trim() !== '' &&
+      photoKeys.has(String(k || ''));
+
+    const walk = async (node) => {
+      if (node == null || typeof node !== 'object') return;
+      if (visited.has(node)) return;
+      visited.add(node);
+
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          await walk(item);
+        }
+        return;
+      }
+
+      const entries = Object.entries(node);
+      for (const [key, value] of entries) {
+        if (shouldResolve(key, value)) {
+          node[key] = await this.resolveAvatarUrl(value, requestUrl);
+          continue;
+        }
+        if (value && typeof value === 'object') {
+          await walk(value);
+        }
+      }
+    };
+
+    await walk(payload);
+    return payload;
+  }
+
   async makeRequest(endpoint, options = {}) {
     const base = await getApiBaseUrl();
     const url = `${base}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
@@ -227,6 +282,7 @@ class ApiService {
       } catch (_) {
         throw new Error('Server returned invalid JSON. Check API URL and backend logs.');
       }
+      data = await this.normalizePhotoFieldsInResponse(data, url);
       if (isDev) console.log('Response data:', data);
       return data;
     } catch (error) {
@@ -1716,6 +1772,8 @@ class ApiService {
     const headers = { Accept: 'application/json' };
     const tb = getTenantBearerToken();
     if (tb) headers['Authorization'] = `Bearer ${tb}`;
+    const csrf = resolveCsrfTokenForRequest();
+    if (csrf) headers['X-XSRF-TOKEN'] = csrf;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -1756,6 +1814,8 @@ class ApiService {
     const headers = { Accept: 'application/json' };
     const tb = getTenantBearerToken();
     if (tb) headers['Authorization'] = `Bearer ${tb}`;
+    const csrf = resolveCsrfTokenForRequest();
+    if (csrf) headers['X-XSRF-TOKEN'] = csrf;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -4042,7 +4102,7 @@ class ApiService {
    * Turn API path `/api/storage/files/...` into an absolute URL for `<img src>` (same host as API).
    * @param {string} apiPath — `data.url` from uploadSchoolStorageFile
    */
-  async getSchoolStorageFileAbsoluteUrl(apiPath) {
+  async getSchoolStorageFileAbsoluteUrl(apiPath, requestUrl = null) {
     if (!apiPath) return "";
     const rawPath = String(apiPath).trim();
     if (!rawPath) return "";
@@ -4053,10 +4113,14 @@ class ApiService {
     }
 
     let origin = '';
-    const base = await getApiBaseUrl();
     try {
-      // Supports both absolute API URLs and relative `/api` proxy URLs.
-      origin = new URL(base, window.location.origin).origin;
+      if (requestUrl) {
+        origin = new URL(requestUrl, window.location.origin).origin;
+      } else {
+        const base = await getApiBaseUrl();
+        // Supports both absolute API URLs and relative `/api` proxy URLs.
+        origin = new URL(base, window.location.origin).origin;
+      }
     } catch {
       origin = window.location.origin;
     }
@@ -4074,25 +4138,25 @@ class ApiService {
    * Resolve avatar path from DB/API into a safe absolute URL for <img src>.
    * Supports: absolute URL, `/api/...` path, or storage relative `school_{id}/...`.
    */
-  async resolveAvatarUrl(avatarPath) {
+  async resolveAvatarUrl(avatarPath, requestUrl = null) {
     if (!avatarPath) return '';
     const raw = String(avatarPath).trim();
     if (!raw) return '';
     if (/^https?:\/\//i.test(raw)) return raw;
     if (raw.startsWith('/storage/files/')) {
-      return this.getSchoolStorageFileAbsoluteUrl(`/api${raw}`);
+      return this.getSchoolStorageFileAbsoluteUrl(`/api${raw}`, requestUrl);
     }
     if (raw.startsWith('storage/files/')) {
-      return this.getSchoolStorageFileAbsoluteUrl(`/api/${raw}`);
+      return this.getSchoolStorageFileAbsoluteUrl(`/api/${raw}`, requestUrl);
     }
     if (raw.startsWith('api/storage/files/')) {
-      return this.getSchoolStorageFileAbsoluteUrl(`/${raw}`);
+      return this.getSchoolStorageFileAbsoluteUrl(`/${raw}`, requestUrl);
     }
     if (raw.startsWith('/api/')) {
-      return this.getSchoolStorageFileAbsoluteUrl(raw);
+      return this.getSchoolStorageFileAbsoluteUrl(raw, requestUrl);
     }
     if (raw.startsWith('school_')) {
-      return this.getSchoolStorageFileAbsoluteUrl(raw);
+      return this.getSchoolStorageFileAbsoluteUrl(raw, requestUrl);
     }
     return raw;
   }
