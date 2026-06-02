@@ -127,7 +127,9 @@ const ClassRoom = () => {
   const hideModal = (id: string) => {
     const el = document.getElementById(id);
     if (el && (window as any).bootstrap?.Modal) {
-      (window as any).bootstrap.Modal.getInstance(el)?.hide();
+      const modalApi = (window as any).bootstrap.Modal;
+      const modalInstance = modalApi.getInstance(el) ?? modalApi.getOrCreateInstance?.(el) ?? new modalApi(el);
+      modalInstance.hide();
     }
   };
 
@@ -198,21 +200,11 @@ const ClassRoom = () => {
       status: !!record.is_active,
     });
     setSubmitError(null);
-    const el = document.getElementById("edit_class_room");
-    if (el && (window as any).bootstrap?.Modal) {
-      const m = (window as any).bootstrap.Modal.getInstance(el) ?? new (window as any).bootstrap.Modal(el);
-      m.show();
-    }
   };
 
   const openDeleteModal = (record: any) => {
     setRoomToDelete({ id: record.id, room_no: record.roomNo ?? "" });
     setSubmitError(null);
-    const el = document.getElementById("delete-modal");
-    if (el && (window as any).bootstrap?.Modal) {
-      const m = (window as any).bootstrap.Modal.getInstance(el) ?? new (window as any).bootstrap.Modal(el);
-      m.show();
-    }
   };
 
   const columns = [
@@ -267,41 +259,38 @@ const ClassRoom = () => {
       dataIndex: "action",
       render: (_: any, record: any) => (
         <div className="dropdown">
-          <Link
-            to="#"
+          <button
+            type="button"
             className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
             data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
             aria-expanded="false"
-            onClick={(e) => e.preventDefault()}
           >
             <i className="ti ti-dots-vertical fs-14" />
-          </Link>
+          </button>
           <ul className="dropdown-menu dropdown-menu-end p-2">
             <li>
-              <Link
+              <button
+                type="button"
                 className="dropdown-item rounded-1"
-                to="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  openEditModal(record);
-                }}
+                data-bs-toggle="modal"
+                data-bs-target="#edit_class_room"
+                onClick={() => openEditModal(record)}
               >
                 <i className="ti ti-edit-circle me-2" />
                 Edit
-              </Link>
+              </button>
             </li>
             <li>
-              <Link
+              <button
+                type="button"
                 className="dropdown-item rounded-1"
-                to="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  openDeleteModal(record);
-                }}
+                data-bs-toggle="modal"
+                data-bs-target="#delete-modal"
+                onClick={() => openDeleteModal(record)}
               >
                 <i className="ti ti-trash-x me-2" />
                 Delete
-              </Link>
+              </button>
             </li>
           </ul>
         </div>
