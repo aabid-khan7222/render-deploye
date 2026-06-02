@@ -446,12 +446,10 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
 
     const existing = rowByUserId.get(key);
-    const existingScore =
-      existing.type === primaryType ? 100 : (rolePriority[existing.type] || 0);
-    const incomingScore =
-      row.type === primaryType ? 100 : (rolePriority[row.type] || 0);
+    const existingScore = rolePriority[existing.type] || 0;
+    const incomingScore = rolePriority[row.type] || 0;
 
-    // Keep exactly one link per user; choose the row with stronger role precedence.
+    // Keep exactly one link per user; prefer father/mother relation over guardian for parent pages.
     if (incomingScore > existingScore) {
       existing.type = row.type;
       existing.rel = row.rel;
@@ -571,12 +569,153 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     );
   }
 
+  await upsertLegacyParentsRow(client, studentId, {
+    effFatherName,
+    effFatherEmail,
+    effFatherPhone,
+    effFatherOcc,
+    effMotherName,
+    effMotherEmail,
+    effMotherPhone,
+    effMotherOcc,
+    fatherUserId,
+    motherUserId,
+  });
+
   return {
     fatherUserId,
     motherUserId,
     guardianUserId,
     primaryGuardianId: primaryId,
   };
+}
+
+function hasLegacyParentContactValue(...values) {
+  return values.some((v) => v != null && String(v).trim() !== '');
+}
+
+/**
+ * Keep legacy parents row in sync for list screens and older reports (no schema change).
+ */
+async function upsertLegacyParentsRow(
+  client,
+  studentId,
+  {
+    effFatherName,
+    effFatherEmail,
+    effFatherPhone,
+    effFatherOcc,
+    effMotherName,
+    effMotherEmail,
+    effMotherPhone,
+    effMotherOcc,
+    fatherUserId,
+    motherUserId,
+  }
+) {
+  const hasAny = hasLegacyParentContactValue(
+    effFatherName,
+    effFatherEmail,
+    effFatherPhone,
+    effMotherName,
+    effMotherEmail,
+    effMotherPhone
+  );
+  if (!hasAny) return;
+
+  const primaryUserId = fatherUserId || motherUserId || null;
+
+  try {
+    const existing = await client.query(
+      `SELECT id FROM parents WHERE student_id = $1 ORDER BY id DESC LIMIT 1`,
+      [studentId]
+    );
+    if (existing.rows.length > 0) {
+      await client.query(
+        `UPDATE parents SET
+          father_name = COALESCE(NULLIF(TRIM($2::text), ''), father_name),
+          father_email = COALESCE(NULLIF(TRIM($3::text), ''), father_email),
+          father_phone = COALESCE(NULLIF(TRIM($4::text), ''), father_phone),
+          father_occupation = COALESCE(NULLIF(TRIM($5::text), ''), father_occupation),
+          mother_name = COALESCE(NULLIF(TRIM($6::text), ''), mother_name),
+          mother_email = COALESCE(NULLIF(TRIM($7::text), ''), mother_email),
+          mother_phone = COALESCE(NULLIF(TRIM($8::text), ''), mother_phone),
+          mother_occupation = COALESCE(NULLIF(TRIM($9::text), ''), mother_occupation),
+          user_id = COALESCE($10, user_id),
+          updated_at = NOW()
+        WHERE student_id = $1`,
+        [
+          studentId,
+          effFatherName,
+          effFatherEmail,
+          effFatherPhone,
+          effFatherOcc,
+          effMotherName,
+          effMotherEmail,
+          effMotherPhone,
+          effMotherOcc,
+          primaryUserId,
+        ]
+      );
+      return;
+    }
+
+    await client.query(
+      `INSERT INTO parents (
+        student_id, father_name, father_email, father_phone, father_occupation,
+        mother_name, mother_email, mother_phone, mother_occupation, user_id,
+        created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())`,
+      [
+        studentId,
+        effFatherName || null,
+        effFatherEmail || null,
+        effFatherPhone || null,
+        effFatherOcc || null,
+        effMotherName || null,
+        effMotherEmail || null,
+        effMotherPhone || null,
+        effMotherOcc || null,
+        primaryUserId,
+      ]
+    );
+  } catch (err) {
+    if (String(err?.code || '') === '42P01') return;
+    throw err;
+  }
+}
+
+/** SQL fragment: student has father/mother contact via guardian links (and optionally legacy parents row). */
+function parentContactExistsSql(studentIdRef = 's.id', opts = {}) {
+  const includeLegacy = opts.includeLegacy !== false;
+  const linkExists = `EXISTS (
+      SELECT 1
+      FROM student_guardian_links sgl2
+      INNER JOIN guardians g2 ON g2.id = sgl2.guardian_id AND COALESCE(g2.is_active, true) = true
+      INNER JOIN users u2 ON u2.id = g2.user_id
+      WHERE sgl2.student_id = ${studentIdRef}
+        AND (
+          LOWER(BTRIM(COALESCE(sgl2.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+          OR u2.role_id = ${ROLES.PARENT}
+        )
+    )`;
+  if (!includeLegacy) return linkExists;
+  return `(
+    ${linkExists}
+    OR EXISTS (
+      SELECT 1
+      FROM parents p
+      WHERE p.student_id = ${studentIdRef}
+        AND (
+          NULLIF(BTRIM(COALESCE(p.father_name, '')), '') IS NOT NULL
+          OR NULLIF(BTRIM(COALESCE(p.mother_name, '')), '') IS NOT NULL
+          OR NULLIF(BTRIM(COALESCE(p.father_phone, '')), '') IS NOT NULL
+          OR NULLIF(BTRIM(COALESCE(p.mother_phone, '')), '') IS NOT NULL
+          OR NULLIF(BTRIM(COALESCE(p.father_email, '')), '') IS NOT NULL
+          OR NULLIF(BTRIM(COALESCE(p.mother_email, '')), '') IS NOT NULL
+        )
+    )
+  )`;
 }
 
 /**
@@ -793,6 +932,8 @@ module.exports = {
   resolveLinkedUser,
   syncStudentGuardians,
   cleanupStudentContactsOnDelete,
+  upsertLegacyParentsRow,
+  parentContactExistsSql,
   STUDENT_CONTACT_LATERAL_SELECT,
   STUDENT_CONTACT_LATERAL_JOINS,
 };

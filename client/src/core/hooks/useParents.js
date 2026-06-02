@@ -31,9 +31,12 @@ export const useParents = (options = {}) => {
         const transformedDataRaw = await Promise.all(
           rawData.map(async (parent) => {
             if (!parent || typeof parent !== 'object') return null;
-            const resolvedName = parent.father_name || '';
-            const resolvedEmail = parent.father_email || '';
-            const resolvedPhone = parent.father_phone || '';
+            const resolvedName =
+              (parent.father_name || '').trim() ||
+              (parent.mother_name || '').trim() ||
+              '';
+            const resolvedEmail = parent.father_email || parent.mother_email || '';
+            const resolvedPhone = parent.father_phone || parent.mother_phone || '';
             const [resolvedImage, resolvedChildImage, resolvedMotherImage] = await Promise.all([
               parent.father_image_url ? apiService.resolveAvatarUrl(parent.father_image_url) : Promise.resolve(''),
               parent.student_image_url ? apiService.resolveAvatarUrl(parent.student_image_url) : Promise.resolve(''),
