@@ -144,6 +144,32 @@ const Classes = () => {
     cleanupModalBackdrops();
   };
 
+  const closeModalAndWaitForClosed = (modalId: string): Promise<void> =>
+    new Promise((resolve) => {
+      const modalEl = document.getElementById(modalId);
+      if (!modalEl) {
+        cleanupModalBackdrops();
+        resolve();
+        return;
+      }
+
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        cleanupModalBackdrops();
+        resolve();
+      };
+
+      const timeoutId = window.setTimeout(finish, 700);
+      const onHidden = () => {
+        window.clearTimeout(timeoutId);
+        finish();
+      };
+      modalEl.addEventListener("hidden.bs.modal", onHidden, { once: true });
+      closeModalSafely(modalId);
+    });
+
   const showNotification = (msg: string, type: "success" | "danger" | "info" = "info") => {
     setMessage(msg);
     setMessageType(type);
@@ -195,9 +221,10 @@ const Classes = () => {
         is_active: editForm.isActive,
       };
       await apiService.updateClass(editingRow.classId, payload);
+      await closeModalAndWaitForClosed("edit_class");
       await refetch();
       showNotification("Updated successfully", "success");
-      closeEditModalAndCleanup();
+      setEditingRow(null);
     } catch (err) {
       console.error("Failed to save:", err);
       showNotification("Failed to save changes", "danger");
@@ -238,11 +265,8 @@ const Classes = () => {
       if (createRes?.status !== "SUCCESS") {
         throw new Error(createRes?.message || "Class was not created");
       }
+      await closeModalAndWaitForClosed("add_class");
       await refetch();
-
-      // Close modal first
-      const addEl = document.getElementById("add_class");
-      if (addEl) closeModalSafely("add_class");
 
       // Clear form and show success
       setAddForm({
@@ -267,10 +291,10 @@ const Classes = () => {
     try {
       if (selectedDeleteRow.sectionId) await apiService.deleteSection(selectedDeleteRow.sectionId);
       else await apiService.deleteClass(selectedDeleteRow.classId);
+      await closeModalAndWaitForClosed("delete-modal");
       await refetch();
       showNotification("Deleted successfully", "success");
       setSelectedDeleteRow(null);
-      closeModalSafely("delete-modal");
     } catch {
       showNotification("Failed to delete record", "danger");
       closeModalSafely("delete-modal");
