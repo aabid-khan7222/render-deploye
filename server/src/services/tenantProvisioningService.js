@@ -659,6 +659,7 @@ async function createTenantDatabase(dbName, schoolName = null) {
   const dbAlreadyExists = checkRes.rowCount > 0;
   const useTemplateClone = shouldUseTemplateDbClone();
   const templateDbName = (process.env.PROVISIONING_TEMPLATE_DB_NAME || '').toString().trim();
+  let usedSqlFileImport = dbAlreadyExists || !useTemplateClone;
 
   if (dbAlreadyExists) {
     // If the database already exists, we treat this as an idempotent
@@ -675,22 +676,31 @@ async function createTenantDatabase(dbName, schoolName = null) {
       );
       await new Promise((r) => setTimeout(r, 400));
       await pool.query(`CREATE DATABASE "${dbName}" TEMPLATE "${templateDbName}"`);
+      usedSqlFileImport = false;
     } catch (err) {
-      throw new Error(
-        `Failed to create tenant database "${dbName}" from template "${templateDbName}": ${err.message}. ` +
-          'Ensure the template DB exists and is not in use, or set PROVISIONING_USE_DB_TEMPLATE_CLONE=false to use SQL import.'
+      // Fallback keeps provisioning resilient when template clone is temporarily blocked/busy.
+      console.warn(
+        `[provisioning] Template clone failed for "${dbName}" from "${templateDbName}", falling back to SQL import: ${err.message}`
       );
+      try {
+        await pool.query(`CREATE DATABASE "${dbName}"`);
+        usedSqlFileImport = true;
+      } catch (fallbackErr) {
+        throw new Error(
+          `Failed to create tenant database "${dbName}" from template "${templateDbName}" (${err.message}), and fallback CREATE DATABASE also failed (${fallbackErr.message}).`
+        );
+      }
     }
   } else {
     try {
       await pool.query(`CREATE DATABASE "${dbName}"`);
+      usedSqlFileImport = true;
     } catch (err) {
       throw new Error(`Failed to create tenant database "${dbName}": ${err.message}`);
     }
   }
 
   // Import from SQL file when we did not clone, or when reusing an existing DB (re-sync schema).
-  const usedSqlFileImport = dbAlreadyExists || !useTemplateClone;
 
   const tenantPool = createPoolForTenantDb(dbName);
   try {
@@ -794,6 +804,7 @@ async function createHeadmasterUserInTenant(dbName, adminName, adminEmail, admin
   const pool = createPoolForTenantDb(dbName);
 
   try {
+    await ensureTenantDefaultRoles(pool);
     const roleRes = await pool.query(
       `
       SELECT id
