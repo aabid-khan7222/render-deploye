@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { exportToExcel, exportToPDF, printData } from "../../../core/utils/exportUtils";
 import { useSections } from "../../../core/hooks/useSections";
 import { useClassRooms } from "../../../core/hooks/useClassRooms";
@@ -11,15 +11,15 @@ import Swal from "sweetalert2";
 
 const ClassSectionsAssignment = () => {
   const routes = all_routes;
-  const { sections = [] as any[], loading: sectionsLoading } = useSections();
-  const { classRooms = [] as any[], loading: roomsLoading } = useClassRooms();
+  const { sections = [] as any[] } = useSections();
+  const { classRooms = [] as any[] } = useClassRooms();
 
   const [classes, setClasses] = useState<any[]>([]);
   const [classesLoading, setClassesLoading] = useState(true);
   const [selectedClass, setSelectedClass] = useState<any>(null);
-  const [assignedSections, setAssignedSections] = useState<any[]>([]);
   const [loadingAssignments, setLoadingAssignments] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isManageModalOpen, setIsManageModalOpen] = useState(false);
 
   const showToast = (title: string, icon: 'success' | 'error' | 'warning' = 'success') => {
     Swal.fire({
@@ -49,6 +49,18 @@ const ClassSectionsAssignment = () => {
     fetchSummary();
   }, []);
 
+  useEffect(() => {
+    if (isManageModalOpen) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
+
+    return () => {
+      document.body.classList.remove("modal-open");
+    };
+  }, [isManageModalOpen]);
+
   // For modal form
   const [selectedSectionIds, setSelectedSectionIds] = useState<(number | null)[]>([]);
   const [sectionDetails, setSectionDetails] = useState<Record<string, { class_room_id: number | string, max_students: number }>>({});
@@ -61,8 +73,6 @@ const ClassSectionsAssignment = () => {
     try {
       const res = await apiService.getClassSections(classId);
       const data = res?.data || [];
-      setAssignedSections(data);
-
       // Initialize form state
       const ids: number[] = [];
       const details: any = {};
@@ -94,9 +104,17 @@ const ClassSectionsAssignment = () => {
 
   const handleManageClick = (cls: any) => {
     setSelectedClass(cls);
-    fetchAssignments(cls.id);
-    const modal = (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("manage_sections_modal"));
-    modal?.show();
+    setIsManageModalOpen(true);
+    void fetchAssignments(cls.id);
+  };
+
+  const handleCloseManageModal = () => {
+    if (saving) return;
+    setIsManageModalOpen(false);
+    setSelectedClass(null);
+    setSelectedSectionIds([]);
+    setSectionDetails({});
+    setLoadingAssignments(false);
   };
 
   const handleToggleSection = (sectionId: number) => {
@@ -216,9 +234,8 @@ const ClassSectionsAssignment = () => {
       const res = await apiService.assignSectionsToClass(payload);
       if (res.status === "SUCCESS") {
         showToast("Assignments updated successfully", 'success');
-        fetchSummary();
-        const modal = (window as any).bootstrap?.Modal?.getInstance(document.getElementById("manage_sections_modal"));
-        modal?.hide();
+        void fetchSummary();
+        handleCloseManageModal();
       } else {
         throw new Error(res.message || "Failed to update assignments");
       }
@@ -383,7 +400,13 @@ const ClassSectionsAssignment = () => {
       </div>
 
       {/* Management Modal */}
-      <div className="modal fade" id="manage_sections_modal" tabIndex={-1} aria-hidden="true">
+      <div
+        className={`modal fade ${isManageModalOpen ? "show d-block" : ""}`}
+        id="manage_sections_modal"
+        tabIndex={-1}
+        aria-hidden={!isManageModalOpen}
+        role="dialog"
+      >
         <div className="modal-dialog modal-dialog-centered modal-lg">
           <div className="modal-content border-0 shadow-lg">
             <div className="modal-header bg-primary text-white border-0">
@@ -391,7 +414,7 @@ const ClassSectionsAssignment = () => {
                 <h5 className="mb-0 text-white">Manage Sections for <span className="fw-bold">{selectedClass?.class_name}</span></h5>
                 <p className="fs-12 mb-0 opacity-75">Assign sections and configure their settings</p>
               </div>
-              <button type="button" className="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+              <button type="button" className="btn-close btn-close-white" onClick={handleCloseManageModal} aria-label="Close"></button>
             </div>
             <div className="modal-body p-4">
               {loadingAssignments ? (
@@ -500,7 +523,7 @@ const ClassSectionsAssignment = () => {
               )}
             </div>
             <div className="modal-footer border-top bg-light">
-              <button type="button" className="btn btn-light px-4" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" className="btn btn-light px-4" onClick={handleCloseManageModal}>Cancel</button>
               <button
                 type="button"
                 className="btn btn-primary px-4 shadow-sm"
@@ -518,6 +541,7 @@ const ClassSectionsAssignment = () => {
           </div>
         </div>
       </div>
+      {isManageModalOpen ? <div className="modal-backdrop fade show"></div> : null}
     </div>
   );
 };
