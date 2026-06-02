@@ -99,6 +99,13 @@ function hideBootstrapModalById(modalId: string) {
   if (Bs) {
     const inst = Bs.getInstance(el) ?? Bs.getOrCreateInstance(el);
     inst?.hide();
+  } else {
+    // Fallback when Bootstrap JS is not available: hide purely via DOM updates
+    el.classList.remove("show");
+    el.setAttribute("aria-hidden", "true");
+    el.removeAttribute("aria-modal");
+    el.removeAttribute("role");
+    (el as HTMLElement).style.display = "none";
   }
   setTimeout(() => cleanupBootstrapModalBackdrop(), 350);
 }
