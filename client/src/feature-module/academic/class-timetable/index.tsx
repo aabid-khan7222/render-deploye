@@ -179,7 +179,11 @@ function TimetableCell({
 
   if (isEmpty) {
     return (
-      <td className="align-top p-2" style={{ minWidth: 170, maxWidth: 280 }}>
+      <td
+        className="align-top p-2"
+        style={{ minWidth: 170, maxWidth: 280 }}
+        data-slot-clickable="true"
+      >
         <div className="small text-muted mb-2 border-bottom pb-1">
           <span>{slot.start}{slot.end ? ` – ${slot.end}` : ""}</span>
         </div>
@@ -192,6 +196,14 @@ function TimetableCell({
             transition: "all 0.2s ease-in-out"
           }}
           onClick={onEditClick}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onEditClick();
+            }
+          }}
           onMouseEnter={(e) => {
             e.currentTarget.style.borderColor = "#0d6efd";
             e.currentTarget.style.backgroundColor = "#f0f5ff";
@@ -223,6 +235,15 @@ function TimetableCell({
         transition: "all 0.15s"
       }}
       onClick={onEditClick}
+      role="button"
+      tabIndex={0}
+      data-slot-clickable="true"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onEditClick();
+        }
+      }}
       onMouseEnter={(e) => {
         e.currentTarget.style.boxShadow = "inset 0 0 0 1px #0d6efd";
       }}
@@ -293,8 +314,10 @@ const ClassTimetable = () => {
   const [showRightScroll, setShowRightScroll] = useState(false);
 
   const [isDragging, setIsDragging] = useState(false);
+  const [dragArmed, setDragArmed] = useState(false);
   const startX = useRef(0);
   const scrollLeftStart = useRef(0);
+  const dragStartedRef = useRef(false);
 
   const updateScrollButtons = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -322,33 +345,44 @@ const ClassTimetable = () => {
       target.closest("select") || 
       target.closest(".badge") ||
       target.closest("input") ||
-      target.closest(".ts-control")
+      target.closest(".ts-control") ||
+      target.closest("[data-slot-clickable='true']")
     ) {
       return;
     }
     const el = scrollContainerRef.current;
     if (!el) return;
-    setIsDragging(true);
+    setDragArmed(true);
+    dragStartedRef.current = false;
     startX.current = e.pageX - el.offsetLeft;
     scrollLeftStart.current = el.scrollLeft;
   };
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (!isDragging) return;
+    if (!dragArmed) return;
     const el = scrollContainerRef.current;
     if (!el) return;
-    e.preventDefault();
     const x = e.pageX - el.offsetLeft;
-    const walk = (x - startX.current) * 1.5;
+    const delta = x - startX.current;
+    if (!dragStartedRef.current) {
+      // Keep normal clicks intact; start drag only after deliberate movement.
+      if (Math.abs(delta) < 6) return;
+      dragStartedRef.current = true;
+      setIsDragging(true);
+    }
+    e.preventDefault();
+    const walk = delta * 1.5;
     el.scrollLeft = scrollLeftStart.current - walk;
-  }, [isDragging]);
+  }, [dragArmed]);
 
   const handleMouseUpOrLeave = useCallback(() => {
+    setDragArmed(false);
     setIsDragging(false);
+    dragStartedRef.current = false;
   }, []);
 
   useEffect(() => {
-    if (isDragging) {
+    if (dragArmed) {
       window.addEventListener("mousemove", handleMouseMove);
       window.addEventListener("mouseup", handleMouseUpOrLeave);
     }
@@ -356,7 +390,7 @@ const ClassTimetable = () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUpOrLeave);
     };
-  }, [isDragging, handleMouseMove, handleMouseUpOrLeave]);
+  }, [dragArmed, handleMouseMove, handleMouseUpOrLeave]);
 
   // Copy Routine state
   const [copySourceClassId, setCopySourceClassId] = useState("");
