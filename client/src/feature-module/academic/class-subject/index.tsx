@@ -413,7 +413,13 @@ const ClassSubject = () => {
       </div>
 
       {/* Assign Modal */}
-      <div className={`modal fade ${isAddAssignmentModalOpen ? "show d-block" : ""}`} id="add_assignment" aria-hidden={!isAddAssignmentModalOpen} role="dialog">
+      <div
+        className={`modal fade ${isAddAssignmentModalOpen ? "show d-block" : ""}`}
+        id="add_assignment"
+        aria-hidden={!isAddAssignmentModalOpen}
+        role="dialog"
+        style={{ zIndex: 1060 }}
+      >
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
@@ -538,7 +544,13 @@ const ClassSubject = () => {
       </div>
 
       {/* Edit Modal */}
-      <div className={`modal fade ${isEditAssignmentModalOpen ? "show d-block" : ""}`} id="edit_assignment" aria-hidden={!isEditAssignmentModalOpen} role="dialog">
+      <div
+        className={`modal fade ${isEditAssignmentModalOpen ? "show d-block" : ""}`}
+        id="edit_assignment"
+        aria-hidden={!isEditAssignmentModalOpen}
+        role="dialog"
+        style={{ zIndex: 1060 }}
+      >
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
@@ -586,7 +598,13 @@ const ClassSubject = () => {
         </div>
       </div>
       {/* Manage Groups Modal */}
-      <div className={`modal fade ${isManageGroupsModalOpen ? "show d-block" : ""}`} id="manage_groups" aria-hidden={!isManageGroupsModalOpen} role="dialog">
+      <div
+        className={`modal fade ${isManageGroupsModalOpen ? "show d-block" : ""}`}
+        id="manage_groups"
+        aria-hidden={!isManageGroupsModalOpen}
+        role="dialog"
+        style={{ zIndex: 1060 }}
+      >
         <div className="modal-dialog modal-dialog-centered modal-lg">
           <div className="modal-content">
             <div className="modal-header">
@@ -801,7 +819,9 @@ const ClassSubject = () => {
           </div>
         </div>
       </div>
-      {isAddAssignmentModalOpen || isEditAssignmentModalOpen || isManageGroupsModalOpen ? <div className="modal-backdrop fade show"></div> : null}
+      {isAddAssignmentModalOpen || isEditAssignmentModalOpen || isManageGroupsModalOpen ? (
+        <div className="modal-backdrop fade show" style={{ zIndex: 1055 }}></div>
+      ) : null}
     </div>
   );
 };

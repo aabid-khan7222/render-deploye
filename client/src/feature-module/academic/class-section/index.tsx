@@ -27,88 +27,6 @@ function normalizeSectionActive(rawValue: unknown): boolean {
   return false;
 }
 
-/**
- * After async submit + React state updates, Bootstrap 5 sometimes leaves `.modal-backdrop`
- * and `modal-open` on `body`, so the page looks dimmed and does not accept clicks.
- * Same mitigation as Classes edit modal (see classes/index.tsx).
- */
-function cleanupBootstrapModalArtifacts() {
-  setTimeout(() => {
-    document.querySelectorAll(".modal-backdrop").forEach((el) => el.remove());
-    document.body.classList.remove("modal-open");
-    document.body.style.removeProperty("overflow");
-    document.body.style.removeProperty("padding-right");
-  }, 150);
-}
-
-function hideModalByDismissClick(modalEl: HTMLElement | null) {
-  if (!modalEl) {
-    cleanupBootstrapModalArtifacts();
-    return;
-  }
-  if (document.activeElement instanceof HTMLElement) {
-    document.activeElement.blur();
-  }
-  const dismissBtn = modalEl.querySelector('[data-bs-dismiss="modal"]') as HTMLElement | null;
-  if (dismissBtn) {
-    dismissBtn.click();
-  } else {
-    hideBootstrapModalByElement(modalEl);
-  }
-  cleanupBootstrapModalArtifacts();
-}
-
-function hideBootstrapModalByElement(modalEl: HTMLElement | null) {
-  const bs = (window as any).bootstrap;
-  if (modalEl && bs?.Modal?.getOrCreateInstance) {
-    bs.Modal.getOrCreateInstance(modalEl).hide();
-  } else if (modalEl) {
-    modalEl.classList.remove("show");
-    modalEl.setAttribute("aria-hidden", "true");
-    modalEl.removeAttribute("aria-modal");
-    modalEl.removeAttribute("role");
-    modalEl.style.display = "none";
-  }
-  cleanupBootstrapModalArtifacts();
-}
-
-/**
- * Wait until the modal is fully hidden (backdrop removed by Bootstrap) before React refetches.
- * Refetching while the modal is closing can leave a stuck `.modal-backdrop` / `modal-open` on `body`.
- */
-function hideBootstrapModalAndWaitForClosed(modalEl: HTMLElement | null): Promise<void> {
-  return new Promise((resolve) => {
-    if (!modalEl) {
-      cleanupBootstrapModalArtifacts();
-      resolve();
-      return;
-    }
-    const bs = (window as any).bootstrap;
-    const inst = bs?.Modal?.getOrCreateInstance?.(modalEl);
-    if (!inst?.hide) {
-      hideModalByDismissClick(modalEl);
-      cleanupBootstrapModalArtifacts();
-      resolve();
-      return;
-    }
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      cleanupBootstrapModalArtifacts();
-      resolve();
-    };
-    const t = window.setTimeout(finish, 600);
-    const onHidden = () => {
-      window.clearTimeout(t);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-      finish();
-    };
-    modalEl.addEventListener("hidden.bs.modal", onHidden, { once: true });
-    inst.hide();
-  });
-}
-
 const ClassSection = () => {
   const routes = all_routes;
   const academicYearId = useSelector(selectSelectedAcademicYearId);
@@ -125,6 +43,9 @@ const ClassSection = () => {
   const [isUpdating, setIsUpdating] = useState<boolean>(false);
   const [isCreating, setIsCreating] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
   const [message, setMessage] = useState<string>("");
   const [addForm, setAddForm] = useState({
     section_name: "",
@@ -139,13 +60,27 @@ const ClassSection = () => {
   const [filterStatus, setFilterStatus] = useState("Select");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
   const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
-  const editModalRef = useRef<HTMLDivElement | null>(null);
   
   const handleApplyClick = () => {
     if (dropdownMenuRef.current) {
       dropdownMenuRef.current.classList.remove("show");
     }
   };
+
+  useEffect(() => {
+    const hasOpenModal = isAddModalOpen || isEditModalOpen || isDeleteModalOpen;
+    if (hasOpenModal) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
+
+    return () => {
+      document.body.classList.remove("modal-open");
+      document.body.style.removeProperty("overflow");
+      document.body.style.removeProperty("padding-right");
+    };
+  }, [isAddModalOpen, isEditModalOpen, isDeleteModalOpen]);
 
 
   const classOptions = useMemo(
@@ -243,7 +178,7 @@ const ClassSection = () => {
         class_room_id: "Select",
         description: "",
       });
-      hideModalByDismissClick(document.getElementById("add_class_section"));
+      setIsAddModalOpen(false);
     } finally { setIsCreating(false); }
   };
 
@@ -252,12 +187,10 @@ const ClassSection = () => {
     setIsDeleting(true);
     try {
       await apiService.deleteSection(selectedSection.id);
-      if (document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
-      }
-      await hideBootstrapModalAndWaitForClosed(document.getElementById("delete-modal"));
+      setIsDeleteModalOpen(false);
       await refetch();
       setMessage('Section deleted successfully');
+      setSelectedSection(null);
     } finally { setIsDeleting(false); }
   };
 
@@ -276,11 +209,36 @@ const ClassSection = () => {
     );
     setEditDescription(section?.description != null ? String(section.description) : "");
     setEditSectionStatus(normalizeSectionActive(section?.is_active));
+    setIsEditModalOpen(true);
   };
 
   // Handle delete button click
   const handleDeleteClick = (section: any) => {
     setSelectedSection(section);
+    setIsDeleteModalOpen(true);
+  };
+
+  const closeAddModal = () => {
+    if (isCreating) return;
+    setIsAddModalOpen(false);
+  };
+
+  const closeEditModal = () => {
+    if (isUpdating) return;
+    setIsEditModalOpen(false);
+    setSelectedSection(null);
+    setEditSectionName("");
+    setEditClassId("");
+    setEditMaxStudents("");
+    setEditClassRoomId("Select");
+    setEditDescription("");
+    setEditSectionStatus(true);
+  };
+
+  const closeDeleteModal = () => {
+    if (isDeleting) return;
+    setIsDeleteModalOpen(false);
+    setSelectedSection(null);
   };
 
   // Handle save edit form submission
@@ -324,7 +282,7 @@ const ClassSection = () => {
       const response = await apiService.updateSection(selectedSection.id, updateData);
 
       if (response && response.status === 'SUCCESS') {
-        hideModalByDismissClick(document.getElementById("edit_class_section"));
+        setIsEditModalOpen(false);
 
         await refetch();
         setMessage('Section updated successfully');
@@ -357,28 +315,6 @@ const ClassSection = () => {
       setIsUpdating(false);
     }
   };
-
-  // Reset edit form when modal is closed
-  useEffect(() => {
-    const editModalElement = document.getElementById('edit_class_section');
-    if (editModalElement) {
-      const handleModalHidden = () => {
-        setSelectedSection(null);
-        setEditSectionName("");
-        setEditClassId("");
-        setEditMaxStudents("");
-        setEditClassRoomId("Select");
-        setEditDescription("");
-        setEditSectionStatus(true);
-      };
-
-      editModalElement.addEventListener("hidden.bs.modal", handleModalHidden);
-      
-      return () => {
-        editModalElement.removeEventListener('hidden.bs.modal', handleModalHidden);
-      };
-    }
-  }, []);
 
   // Transform API data to match table structure
   const transformedData = useMemo(() => {
@@ -499,19 +435,19 @@ const ClassSection = () => {
     {
       title: "Class",
       dataIndex: "className",
-      sorter: (a: TableData, b: TableData) =>
+      sorter: (a: any, b: any) =>
         String(a.className || "").localeCompare(String(b.className || "")),
     },
     {
       title: "Section teacher",
       dataIndex: "sectionTeacher",
-      sorter: (a: TableData, b: TableData) =>
+      sorter: (a: any, b: any) =>
         String(a.sectionTeacher || "").localeCompare(String(b.sectionTeacher || "")),
     },
     {
       title: "Max students",
       dataIndex: "maxStudents",
-      sorter: (a: TableData, b: TableData) =>
+      sorter: (a: any, b: any) =>
         String(a.maxStudents || "").localeCompare(String(b.maxStudents || ""), undefined, {
           numeric: true,
         }),
@@ -519,7 +455,7 @@ const ClassSection = () => {
     {
       title: "Room",
       dataIndex: "roomNumber",
-      sorter: (a: TableData, b: TableData) =>
+      sorter: (a: any, b: any) =>
         String(a.roomNumber || "").localeCompare(String(b.roomNumber || "")),
     },
     {
@@ -553,47 +489,24 @@ const ClassSection = () => {
       title: "Action",
       dataIndex: "action",
       render: (text: string, record: any) => (
-        <>
-          <div className="d-flex align-items-center">
-            <div className="dropdown">
-              <Link
-                to="#"
-                className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
-                data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
-                aria-expanded="false"
-                onClick={(e) => e.preventDefault()}
-              >
-                <i className="ti ti-dots-vertical fs-14" />
-              </Link>
-              <ul className="dropdown-menu dropdown-menu-end p-2">
-                <li>
-                  <button
-                    type="button"
-                    className="dropdown-item rounded-1"
-                    data-bs-toggle="modal"
-                    data-bs-target="#edit_class_section"
-                    onClick={() => handleEditClick(record.sectionData)}
-                  >
-                    <i className="ti ti-edit-circle me-2" />
-                    Edit
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    className="dropdown-item rounded-1"
-                    data-bs-toggle="modal"
-                    data-bs-target="#delete-modal"
-                    onClick={() => handleDeleteClick(record.sectionData)}
-                  >
-                    <i className="ti ti-trash-x me-2" />
-                    Delete
-                  </button>
-                </li>
-              </ul>
-            </div>
+          <div className="d-flex align-items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-outline-primary btn-sm"
+              onClick={() => handleEditClick(record.sectionData)}
+            >
+              <i className="ti ti-edit-circle me-1" />
+              Edit
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline-danger btn-sm"
+              onClick={() => handleDeleteClick(record.sectionData)}
+            >
+              <i className="ti ti-trash-x me-1" />
+              Delete
+            </button>
           </div>
-        </>
       ),
     },
   ];
@@ -629,15 +542,14 @@ const ClassSection = () => {
                 onExportExcel={handleExportExcel}
               />
                 <div className="mb-2">
-                  <Link
-                    to="#"
+                  <button
+                    type="button"
                     className="btn btn-primary"
-                    data-bs-toggle="modal"
-                    data-bs-target="#add_class_section"
+                    onClick={() => setIsAddModalOpen(true)}
                   >
                     <i className="ti ti-square-rounded-plus-filled me-2" />
                     Add Section
-                  </Link>
+                  </button>
                 </div>
               </div>
             </div>
@@ -783,7 +695,13 @@ const ClassSection = () => {
       </>
       <div>
         {/* Add Class Section */}
-        <div className="modal fade" id="add_class_section">
+        <div
+          className={`modal fade ${isAddModalOpen ? "show d-block" : ""}`}
+          id="add_class_section"
+          aria-hidden={!isAddModalOpen}
+          role="dialog"
+          style={{ zIndex: 1060 }}
+        >
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content">
               <div className="modal-header">
@@ -791,7 +709,7 @@ const ClassSection = () => {
                 <button
                   type="button"
                   className="btn-close custom-btn-close"
-                  data-bs-dismiss="modal"
+                  onClick={closeAddModal}
                   aria-label="Close"
                 >
                   <i className="ti ti-x" />
@@ -881,13 +799,13 @@ const ClassSection = () => {
                   </div>
                 </div>
                 <div className="modal-footer">
-                  <Link
-                    to="#"
+                  <button
+                    type="button"
                     className="btn btn-light me-2"
-                    data-bs-dismiss="modal"
+                    onClick={closeAddModal}
                   >
                     Cancel
-                  </Link>
+                  </button>
                   <button type="submit" className="btn btn-primary" disabled={isCreating}>{isCreating ? "Adding..." : "Add Section"}</button>
                 </div>
               </form>
@@ -896,7 +814,13 @@ const ClassSection = () => {
         </div>
         {/* /Add Class Section */}
         {/* Edit Class Section */}
-        <div className="modal fade" id="edit_class_section" ref={editModalRef}>
+        <div
+          className={`modal fade ${isEditModalOpen ? "show d-block" : ""}`}
+          id="edit_class_section"
+          aria-hidden={!isEditModalOpen}
+          role="dialog"
+          style={{ zIndex: 1060 }}
+        >
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content">
               <div className="modal-header">
@@ -904,7 +828,7 @@ const ClassSection = () => {
                 <button
                   type="button"
                   className="btn-close custom-btn-close"
-                  data-bs-dismiss="modal"
+                  onClick={closeEditModal}
                   aria-label="Close"
                 >
                   <i className="ti ti-x" />
@@ -992,7 +916,7 @@ const ClassSection = () => {
                   <button
                     type="button"
                     className="btn btn-light me-2"
-                    data-bs-dismiss="modal"
+                    onClick={closeEditModal}
                     disabled={isUpdating}
                   >
                     Cancel
@@ -1011,7 +935,13 @@ const ClassSection = () => {
         </div>
         {/* /Edit Class Section */}
         {/* Delete Modal */}
-        <div className="modal fade" id="delete-modal">
+        <div
+          className={`modal fade ${isDeleteModalOpen ? "show d-block" : ""}`}
+          id="delete-modal"
+          aria-hidden={!isDeleteModalOpen}
+          role="dialog"
+          style={{ zIndex: 1060 }}
+        >
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content">
               <form >
@@ -1025,13 +955,13 @@ const ClassSection = () => {
                     once you delete.
                   </p>
                   <div className="d-flex justify-content-center">
-                    <Link
-                      to="#"
+                    <button
+                      type="button"
                       className="btn btn-light me-3"
-                      data-bs-dismiss="modal"
+                      onClick={closeDeleteModal}
                     >
                       Cancel
-                    </Link>
+                    </button>
                     <button type="button" className="btn btn-danger" onClick={handleDeleteConfirm} disabled={isDeleting}>{isDeleting ? "Deleting..." : "Yes, Delete"}</button>
                   </div>
                 </div>
@@ -1040,6 +970,9 @@ const ClassSection = () => {
           </div>
         </div>
         {/* /Delete Modal */}
+        {isAddModalOpen || isEditModalOpen || isDeleteModalOpen ? (
+          <div className="modal-backdrop fade show" style={{ zIndex: 1055 }}></div>
+        ) : null}
       </div>
     </div>
   );
