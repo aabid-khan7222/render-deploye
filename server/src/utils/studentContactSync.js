@@ -587,7 +587,8 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
   }
 
-  if (primaryId) {
+  // Canonical (slim) schema: links live in student_guardian_links only — no students.guardian_id column.
+  if (primaryId && !slim) {
     await client.query(
       `UPDATE students SET guardian_id = $1, updated_at = NOW() WHERE id = $2`,
       [primaryId, studentId]
@@ -932,8 +933,17 @@ async function cleanupStudentContactsOnDelete(client, studentId) {
 
   await client.query('DELETE FROM student_guardian_links WHERE student_id = $1', [sid]);
 
-  await client.query(
-    `UPDATE students SET guardian_id = NULL, updated_at = NOW() WHERE id = $1`,
+  // Legacy tenants only: slim schema has no students.guardian_id / parent_id (links table is source of truth).
+  await runOptionalLegacyStatement(
+    client,
+    'sp_cleanup_students_guardian_fk',
+    `UPDATE students SET guardian_id = NULL WHERE id = $1`,
+    [sid]
+  );
+  await runOptionalLegacyStatement(
+    client,
+    'sp_cleanup_students_parent_fk',
+    `UPDATE students SET parent_id = NULL WHERE id = $1`,
     [sid]
   );
 
