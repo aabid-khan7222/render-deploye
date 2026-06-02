@@ -379,6 +379,22 @@ const getMyParents = async (req, res) => {
   }
 };
 
+/** Student has at least one father/mother contact (by relation or Parent role), not guardian-only. */
+const parentContactExistsSql = `
+  EXISTS (
+    SELECT 1
+    FROM student_guardian_links sgl2
+    INNER JOIN guardians g2 ON g2.id = sgl2.guardian_id AND COALESCE(g2.is_active, true) = true
+    INNER JOIN users u2 ON u2.id = g2.user_id
+    WHERE sgl2.student_id = s.id
+      AND (
+        LOWER(BTRIM(COALESCE(sgl2.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu', 'mother', 'mom', 'mummy', 'ammi')
+        OR u2.role_id = ${ROLES.PARENT}
+      )
+  )`;
+
+const parentListStudentWhereSql = `s.deleted_at IS NULL AND COALESCE(s.status, 'Active') = 'Active'`;
+
 const parentListSelectSql = `
         s.id,
         s.id AS student_id,
@@ -464,8 +480,8 @@ const getAllParents = async (req, res) => {
       `SELECT COUNT(*)::int as total
        FROM students s
        ${lateralCurrentEnrollment('s.id')}
-       WHERE s.status = 'Active'
-         AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
+       WHERE ${parentListStudentWhereSql}
+         AND ${parentContactExistsSql}
          ${scopingSql}${yearWhere}`,
       countParams
     );
@@ -473,8 +489,8 @@ const getAllParents = async (req, res) => {
     const result = await query(
       `SELECT ${parentListSelectSql}
        ${parentListJoins}
-       WHERE s.status = 'Active'
-         AND EXISTS (SELECT 1 FROM student_guardian_links sgl2 WHERE sgl2.student_id = s.id)
+       WHERE ${parentListStudentWhereSql}
+         AND ${parentContactExistsSql}
          ${scopingSql}${yearWhere}
        ORDER BY u.first_name ASC, u.last_name ASC
        LIMIT $${limitOffsetIdx[0]} OFFSET $${limitOffsetIdx[1]}`,

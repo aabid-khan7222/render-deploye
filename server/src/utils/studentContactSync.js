@@ -7,6 +7,7 @@ const {
   ensureParentContactUser,
   ensureGuardianContactUser,
 } = require('./contactUserService');
+const { ROLES } = require('../config/roles');
 
 async function guardiansIsSlimSchema(client) {
   const r = await client.query(
@@ -429,7 +430,9 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   }
 
   const primaryType = guardianUserId ? 'guardian' : fatherUserId ? 'father' : motherUserId ? 'mother' : null;
-  const rolePriority = { mother: 1, father: 2, guardian: 3 };
+  // When the same user is linked as father/mother and guardian, keep father/mother relation
+  // so parent list/detail queries (relation-based) still resolve correctly.
+  const rolePriority = { guardian: 1, mother: 2, father: 3 };
   const dedupedRows = [];
   const rowByUserId = new Map();
 
@@ -659,8 +662,17 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
-          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
-        ORDER BY sgl.id ASC
+          AND (
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu')
+            OR u.role_id = ${ROLES.PARENT}
+          )
+        ORDER BY
+          CASE
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('father', 'dad', 'papa', 'abbu') THEN 0
+            WHEN u.role_id = ${ROLES.PARENT} THEN 1
+            ELSE 2
+          END,
+          sgl.id ASC
         LIMIT 1
       ) father_u ON true
       LEFT JOIN LATERAL (
@@ -669,8 +681,20 @@ const STUDENT_CONTACT_LATERAL_JOINS = `
         INNER JOIN guardians g ON g.id = sgl.guardian_id AND COALESCE(g.is_active, true) = true
         INNER JOIN users u ON u.id = g.user_id
         WHERE sgl.student_id = s.id
-          AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
-        ORDER BY sgl.id ASC
+          AND (
+            LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi')
+            OR (
+              u.role_id = ${ROLES.PARENT}
+              AND LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) NOT IN ('father', 'dad', 'papa', 'abbu')
+            )
+          )
+        ORDER BY
+          CASE
+            WHEN LOWER(BTRIM(COALESCE(sgl.relation::text, ''))) IN ('mother', 'mom', 'mummy', 'ammi') THEN 0
+            WHEN u.role_id = ${ROLES.PARENT} THEN 1
+            ELSE 2
+          END,
+          sgl.id ASC
         LIMIT 1
       ) mother_u ON true
       LEFT JOIN LATERAL (
