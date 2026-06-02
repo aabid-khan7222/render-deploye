@@ -9,13 +9,33 @@ const {
 } = require('./contactUserService');
 const { ROLES } = require('../config/roles');
 
-async function guardiansIsSlimSchema(client) {
+async function schemaHasTable(client, tableName) {
+  const r = await client.query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = $1
+     LIMIT 1`,
+    [tableName]
+  );
+  return r.rows.length > 0;
+}
+
+async function schemaHasColumn(client, tableName, columnName) {
   const r = await client.query(
     `SELECT 1 FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = 'guardians' AND column_name = 'first_name'
-     LIMIT 1`
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+     LIMIT 1`,
+    [tableName, columnName]
   );
-  return r.rows.length === 0;
+  return r.rows.length > 0;
+}
+
+/**
+ * True when student ↔ guardian links use student_guardian_links (canonical / migrated tenant).
+ * Do not infer from guardians.first_name — many production DBs keep legacy guardian columns
+ * while links are already the source of truth.
+ */
+async function guardiansIsSlimSchema(client) {
+  return schemaHasTable(client, 'student_guardian_links');
 }
 
 function splitFullName(fullName, fallbackFirstName = '') {
@@ -256,10 +276,13 @@ async function resolveLinkedUser(client, personId, allowedRoleIds) {
 }
 
 /**
- * Create or replace guardian rows for a student. Sets students.guardian_id to primary row.
+ * Create or replace guardian rows for a student.
+ * Primary contact: student_guardian_links (canonical) or students.guardian_id when that column exists.
  */
 async function syncStudentGuardians(client, studentId, payload, warnings) {
-  const slim = await guardiansIsSlimSchema(client);
+  const useLinks = await guardiansIsSlimSchema(client);
+  const studentsHasGuardianId = await schemaHasColumn(client, 'students', 'guardian_id');
+  const guardiansHasStudentId = await schemaHasColumn(client, 'guardians', 'student_id');
 
   const {
     effFatherName,
@@ -365,7 +388,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   // Even when input emails look unique, resolved/reused users can still map
   // multiple slots to the same normalized email in legacy guardians schema.
   // Validate against effective user emails before INSERT to avoid DB 23505.
-  if (!slim) {
+  if (!useLinks) {
     const slotRows = [
       { label: 'Father', userId: fatherUserId },
       { label: 'Mother', userId: motherUserId },
@@ -400,9 +423,9 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
   }
 
-  if (slim) {
+  if (useLinks) {
     await client.query(`DELETE FROM student_guardian_links WHERE student_id = $1`, [studentId]);
-  } else {
+  } else if (guardiansHasStudentId) {
     await client.query(`DELETE FROM guardians WHERE student_id = $1`, [studentId]);
   }
 
@@ -479,7 +502,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
   for (const row of dedupedRows) {
     const isPrimary = primaryType ? row.type === primaryType : dedupedRows.length === 1;
     let ins;
-    if (slim) {
+    if (useLinks) {
       const insG = await client.query(
         `INSERT INTO guardians (
           user_id, annual_income, is_active, created_at, updated_at
@@ -567,7 +590,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
   }
   if (!primaryId && dedupedRows.length > 0) {
-    if (slim) {
+    if (useLinks) {
       const firstG = await client.query(
         `SELECT g.id
          FROM student_guardian_links sgl
@@ -578,7 +601,7 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
         [studentId]
       );
       primaryId = firstG.rows[0]?.id || null;
-    } else {
+    } else if (guardiansHasStudentId) {
       const firstG = await client.query(
         `SELECT id FROM guardians WHERE student_id = $1 ORDER BY id ASC LIMIT 1`,
         [studentId]
@@ -587,15 +610,14 @@ async function syncStudentGuardians(client, studentId, payload, warnings) {
     }
   }
 
-  // Canonical (slim) schema: links live in student_guardian_links only — no students.guardian_id column.
-  if (primaryId && !slim) {
+  if (primaryId && studentsHasGuardianId) {
     await client.query(
       `UPDATE students SET guardian_id = $1, updated_at = NOW() WHERE id = $2`,
       [primaryId, studentId]
     );
   }
 
-  if (primaryId && !slim) {
+  if (primaryId && !useLinks && guardiansHasStudentId) {
     await client.query(
       `UPDATE guardians SET is_primary_contact = (id = $1), updated_at = NOW() WHERE student_id = $2`,
       [primaryId, studentId]
