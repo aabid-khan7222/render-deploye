@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Table from "../../../core/common/dataTable/index";
 import CommonSelect from "../../../core/common/commonSelect";
 import type { TableData } from "../../../core/data/interface";
@@ -31,6 +31,10 @@ const ClassSubject = () => {
 
   const [selectedAssignment, setSelectedAssignment] = useState<any>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAddAssignmentModalOpen, setIsAddAssignmentModalOpen] = useState(false);
+  const [isEditAssignmentModalOpen, setIsEditAssignmentModalOpen] = useState(false);
+  const [isManageGroupsModalOpen, setIsManageGroupsModalOpen] = useState(false);
+  const [isNewGroupFormOpen, setIsNewGroupFormOpen] = useState(false);
   const [newGroup, setNewGroup] = useState({
     name: "",
     max_subjects: 0,
@@ -43,7 +47,18 @@ const ClassSubject = () => {
     elective_group_id: "",
   });
 
-  const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const hasOpenModal = isAddAssignmentModalOpen || isEditAssignmentModalOpen || isManageGroupsModalOpen;
+    if (hasOpenModal) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
+
+    return () => {
+      document.body.classList.remove("modal-open");
+    };
+  }, [isAddAssignmentModalOpen, isEditAssignmentModalOpen, isManageGroupsModalOpen]);
 
   const fetchGroups = useCallback(async (classId: string) => {
     if (!classId) {
@@ -62,12 +77,45 @@ const ClassSubject = () => {
   const openManageGroupsModal = () => {
     const initialClassId = classFilterId || manageGroupsClassId;
     setManageGroupsClassId(initialClassId);
+    setIsManageGroupsModalOpen(true);
     if (initialClassId) {
       fetchGroups(initialClassId);
     } else {
       setElectiveGroups([]);
     }
-    (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("manage_groups"))?.show();
+  };
+
+  const closeManageGroupsModal = () => {
+    setIsManageGroupsModalOpen(false);
+  };
+
+  const openAddAssignmentModal = () => {
+    resetForm();
+    setIsNewGroupFormOpen(false);
+    setIsAddAssignmentModalOpen(true);
+  };
+
+  const closeAddAssignmentModal = () => {
+    if (isSaving) return;
+    setIsAddAssignmentModalOpen(false);
+    setIsNewGroupFormOpen(false);
+  };
+
+  const openEditAssignmentModal = (record: any) => {
+    setSelectedAssignment(record);
+    setForm({
+      class_id: String(record.originalData?.class_id),
+      subject_id: String(record.originalData?.subject_id),
+      is_elective: !!record.originalData?.is_elective,
+      elective_group_id: String(record.originalData?.elective_group_id || ""),
+    });
+    setIsEditAssignmentModalOpen(true);
+  };
+
+  const closeEditAssignmentModal = () => {
+    if (isSaving) return;
+    setIsEditAssignmentModalOpen(false);
+    resetForm();
   };
 
   // Sync groups when class_id changes in the form
@@ -169,52 +217,23 @@ const ClassSubject = () => {
       dataIndex: "action",
       width: 100,
       render: (_: any, record: any) => (
-        <div className="d-flex align-items-center justify-content-center">
-          <div className="dropdown">
-            <Link
-              to="#"
-              className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
-              data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
-              aria-expanded="false"
-            >
-              <i className="ti ti-dots-vertical fs-14" />
-            </Link>
-            <ul className="dropdown-menu dropdown-menu-end p-2 shadow-sm">
-              <li>
-                <Link
-                  className="dropdown-item rounded-1"
-                  to="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    setSelectedAssignment(record);
-                    setForm({
-                      class_id: String(record.originalData?.class_id),
-                      subject_id: String(record.originalData?.subject_id),
-                      is_elective: !!record.originalData?.is_elective,
-                      elective_group_id: String(record.originalData?.elective_group_id || ""),
-                    });
-                    (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("edit_assignment"))?.show();
-                  }}
-                >
-                  <i className="ti ti-edit-circle me-2" />
-                  Edit
-                </Link>
-              </li>
-              <li>
-                <Link
-                  className="dropdown-item rounded-1 text-danger"
-                  to="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    handleDelete(record.id);
-                  }}
-                >
-                  <i className="ti ti-trash-x me-2" />
-                  Remove
-                </Link>
-              </li>
-            </ul>
-          </div>
+        <div className="d-flex align-items-center justify-content-center gap-2">
+          <button
+            type="button"
+            className="btn btn-outline-primary btn-sm"
+            onClick={() => openEditAssignmentModal(record)}
+          >
+            <i className="ti ti-edit-circle me-1" />
+            Edit
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline-danger btn-sm"
+            onClick={() => handleDelete(record.id)}
+          >
+            <i className="ti ti-trash-x me-1" />
+            Remove
+          </button>
         </div>
       ),
     },
@@ -236,7 +255,7 @@ const ClassSubject = () => {
         elective_group_id: form.is_elective && form.elective_group_id ? Number(form.elective_group_id) : null,
       });
       await refetch();
-      (window as any).bootstrap?.Modal?.getInstance(document.getElementById("add_assignment"))?.hide();
+      closeAddAssignmentModal();
       resetForm();
       Swal.fire("Success", "Subject assigned to class successfully", "success");
     } catch (err: any) {
@@ -256,7 +275,7 @@ const ClassSubject = () => {
         elective_group_id: form.is_elective && form.elective_group_id ? Number(form.elective_group_id) : null,
       });
       await refetch();
-      (window as any).bootstrap?.Modal?.getInstance(document.getElementById("edit_assignment"))?.hide();
+      closeEditAssignmentModal();
       resetForm();
       Swal.fire("Success", "Assignment updated successfully", "success");
     } catch (err: any) {
@@ -280,7 +299,7 @@ const ClassSubject = () => {
         await fetchGroups(classId);
         if (!targetClassId) {
           setForm({ ...form, elective_group_id: String(res.data.id) });
-          (window as any).bootstrap?.Collapse?.getOrCreateInstance(document.getElementById("newGroupCollapse"))?.hide();
+          setIsNewGroupFormOpen(false);
         }
         setNewGroup({ name: "", max_subjects: 0, selectable_subjects: 0 });
         Swal.fire({ toast: true, position: 'top-end', showConfirmButton: false, timer: 2000, icon: 'success', title: 'Group created' });
@@ -359,7 +378,7 @@ const ClassSubject = () => {
               </button>
             </div>
             <div className="mb-2">
-              <button className="btn btn-primary d-flex align-items-center" data-bs-toggle="modal" data-bs-target="#add_assignment" onClick={resetForm}>
+              <button type="button" className="btn btn-primary d-flex align-items-center" onClick={openAddAssignmentModal}>
                 <i className="ti ti-square-rounded-plus-filled me-2"></i>
                 Assign Subject
               </button>
@@ -394,12 +413,12 @@ const ClassSubject = () => {
       </div>
 
       {/* Assign Modal */}
-      <div className="modal fade" id="add_assignment">
+      <div className={`modal fade ${isAddAssignmentModalOpen ? "show d-block" : ""}`} id="add_assignment" aria-hidden={!isAddAssignmentModalOpen} role="dialog">
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
               <h4 className="modal-title">Assign Subject to Class</h4>
-              <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
+              <button type="button" className="btn-close" onClick={closeAddAssignmentModal}></button>
             </div>
             <form onSubmit={handleSave}>
               <div className="modal-body">
@@ -438,8 +457,13 @@ const ClassSubject = () => {
                   <div className="border p-3 rounded mb-3 bg-soft-warning">
                     <div className="d-flex align-items-center justify-content-between mb-2">
                       <label className="form-label mb-0">Elective Group</label>
-                      <button type="button" className="btn btn-xs btn-outline-primary" data-bs-toggle="collapse" data-bs-target="#newGroupCollapse" disabled={!form.class_id}>
-                        + New Group
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-outline-primary"
+                        disabled={!form.class_id}
+                        onClick={() => setIsNewGroupFormOpen((prev) => !prev)}
+                      >
+                        {isNewGroupFormOpen ? "Hide" : "+ New Group"}
                       </button>
                     </div>
                     <CommonSelect
@@ -452,7 +476,8 @@ const ClassSubject = () => {
                       isDisabled={!form.class_id}
                     />
                     
-                    <div className="collapse mt-3" id="newGroupCollapse">
+                    {isNewGroupFormOpen ? (
+                    <div className="mt-3" id="newGroupCollapse">
                       <div className="p-3 border rounded bg-white shadow-sm">
                         <h6 className="mb-2 text-primary">Define New Elective Group</h6>
                         <div className="mb-2">
@@ -499,11 +524,12 @@ const ClassSubject = () => {
                         </div>
                       </div>
                     </div>
+                    ) : null}
                   </div>
                 )}
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" className="btn btn-light" onClick={closeAddAssignmentModal}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={isSaving}>{isSaving ? "Assigning..." : "Assign Subject"}</button>
               </div>
             </form>
@@ -512,12 +538,12 @@ const ClassSubject = () => {
       </div>
 
       {/* Edit Modal */}
-      <div className="modal fade" id="edit_assignment">
+      <div className={`modal fade ${isEditAssignmentModalOpen ? "show d-block" : ""}`} id="edit_assignment" aria-hidden={!isEditAssignmentModalOpen} role="dialog">
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
               <h4 className="modal-title">Edit Assignment</h4>
-              <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
+              <button type="button" className="btn-close" onClick={closeEditAssignmentModal}></button>
             </div>
             <form onSubmit={handleUpdate}>
               <div className="modal-body">
@@ -552,7 +578,7 @@ const ClassSubject = () => {
                 )}
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" className="btn btn-light" onClick={closeEditAssignmentModal}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={isSaving}>{isSaving ? "Updating..." : "Save Changes"}</button>
               </div>
             </form>
@@ -560,7 +586,7 @@ const ClassSubject = () => {
         </div>
       </div>
       {/* Manage Groups Modal */}
-      <div className="modal fade" id="manage_groups">
+      <div className={`modal fade ${isManageGroupsModalOpen ? "show d-block" : ""}`} id="manage_groups" aria-hidden={!isManageGroupsModalOpen} role="dialog">
         <div className="modal-dialog modal-dialog-centered modal-lg">
           <div className="modal-content">
             <div className="modal-header">
@@ -570,7 +596,7 @@ const ClassSubject = () => {
                   ? ` — ${classes.find((c) => String(c.id) === manageGroupsClassId)?.class_name || ""}`
                   : ""}
               </h4>
-              <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
+              <button type="button" className="btn-close" onClick={closeManageGroupsModal}></button>
             </div>
             <div className="modal-body">
               <div className="mb-3" style={{ minWidth: "220px" }}>
@@ -770,11 +796,12 @@ const ClassSubject = () => {
               )}
             </div>
             <div className="modal-footer">
-              <button type="button" className="btn btn-primary" data-bs-dismiss="modal">Done</button>
+              <button type="button" className="btn btn-primary" onClick={closeManageGroupsModal}>Done</button>
             </div>
           </div>
         </div>
       </div>
+      {isAddAssignmentModalOpen || isEditAssignmentModalOpen || isManageGroupsModalOpen ? <div className="modal-backdrop fade show"></div> : null}
     </div>
   );
 };
