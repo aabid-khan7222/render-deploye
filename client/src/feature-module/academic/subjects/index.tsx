@@ -1,10 +1,10 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Table from "../../../core/common/dataTable/index";
 import TooltipOption from "../../../core/common/tooltipOption";
 import { all_routes } from "../../router/all_routes";
 import { useSubjects } from "../../../core/hooks/useSubjects";
 import { apiService } from "../../../core/services/apiService";
-import { exportToExcel, exportToPDF, printData } from "../../../core/utils/exportUtils";
+import { printData } from "../../../core/utils/exportUtils";
 import Swal from "sweetalert2";
 import { Link } from "react-router-dom";
 import type { TableData } from "../../../core/data/interface";
@@ -15,6 +15,8 @@ const SubjectList = () => {
 
   const [selectedSubject, setSelectedSubject] = useState<any>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [form, setForm] = useState({
     subject_name: "",
     subject_code: "",
@@ -23,7 +25,58 @@ const SubjectList = () => {
     is_active: true,
   });
 
-  const dropdownMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const hasOpenModal = isAddModalOpen || isEditModalOpen;
+    if (hasOpenModal) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
+
+    return () => {
+      document.body.classList.remove("modal-open");
+    };
+  }, [isAddModalOpen, isEditModalOpen]);
+
+  const resetForm = useCallback(() => {
+    setForm({
+      subject_name: "",
+      subject_code: "",
+      subject_type: "Theory",
+      description: "",
+      is_active: true,
+    });
+  }, []);
+
+  const openAddModal = useCallback(() => {
+    setSelectedSubject(null);
+    resetForm();
+    setIsAddModalOpen(true);
+  }, [resetForm]);
+
+  const closeAddModal = useCallback(() => {
+    if (isSaving) return;
+    setIsAddModalOpen(false);
+  }, [isSaving]);
+
+  const openEditModal = useCallback((record: any) => {
+    setSelectedSubject(record);
+    setForm({
+      subject_name: record.originalData?.subject_name || "",
+      subject_code: record.originalData?.subject_code || "",
+      subject_type: record.originalData?.subject_type || "Theory",
+      description: record.originalData?.description || "",
+      is_active: record.status === "Active",
+    });
+    setIsEditModalOpen(true);
+  }, []);
+
+  const closeEditModal = useCallback(() => {
+    if (isSaving) return;
+    setIsEditModalOpen(false);
+    setSelectedSubject(null);
+    resetForm();
+  }, [isSaving, resetForm]);
 
   const data = useMemo(() => {
     return (subjects ?? []).map((s: any, index: number) => ({
@@ -81,56 +134,24 @@ const SubjectList = () => {
       title: "Action",
       dataIndex: "action",
       render: (_: any, record: any) => (
-        <>
-          <div className="d-flex align-items-center">
-            <div className="dropdown">
-              <Link
-                to="#"
-                className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
-                data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
-                aria-expanded="false"
-              >
-                <i className="ti ti-dots-vertical fs-14" />
-              </Link>
-              <ul className="dropdown-menu dropdown-menu-end p-2">
-                <li>
-                  <Link
-                    className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setSelectedSubject(record);
-                      setForm({
-                        subject_name: record.originalData?.subject_name || "",
-                        subject_code: record.originalData?.subject_code || "",
-                        subject_type: record.originalData?.subject_type || "Theory",
-                        description: record.originalData?.description || "",
-                        is_active: record.status === "Active",
-                      });
-                      (window as any).bootstrap?.Modal?.getOrCreateInstance(document.getElementById("edit_subject"))?.show();
-                    }}
-                  >
-                    <i className="ti ti-edit-circle me-2" />
-                    Edit
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    className="dropdown-item rounded-1 text-danger"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleDelete(record.id);
-                    }}
-                  >
-                    <i className="ti ti-trash-x me-2" />
-                    Delete
-                  </Link>
-                </li>
-              </ul>
-            </div>
+        <div className="d-flex align-items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-outline-primary btn-sm"
+            onClick={() => openEditModal(record)}
+          >
+            <i className="ti ti-edit-circle me-1" />
+            Edit
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline-danger btn-sm"
+            onClick={() => handleDelete(record.id)}
+          >
+            <i className="ti ti-trash-x me-1" />
+            Delete
+          </button>
           </div>
-        </>
       ),
     },
   ];
@@ -148,8 +169,8 @@ const SubjectList = () => {
         is_active: form.is_active,
       });
       await refetch();
-      (window as any).bootstrap?.Modal?.getInstance(document.getElementById("add_subject"))?.hide();
-      setForm({ subject_name: "", subject_code: "", subject_type: "Theory", description: "", is_active: true });
+      closeAddModal();
+      resetForm();
       Swal.fire("Success", "Subject created successfully", "success");
     } catch (err: any) {
       Swal.fire("Error", err.message || "Failed to create subject", "error");
@@ -171,7 +192,7 @@ const SubjectList = () => {
         is_active: form.is_active,
       });
       await refetch();
-      (window as any).bootstrap?.Modal?.getInstance(document.getElementById("edit_subject"))?.hide();
+      closeEditModal();
       Swal.fire("Success", "Subject updated successfully", "success");
     } catch (err: any) {
       Swal.fire("Error", err.message || "Failed to update subject", "error");
@@ -221,7 +242,7 @@ const SubjectList = () => {
               onPrint={() => printData("Subject List", [{ title: "Name", dataKey: "name" }, { title: "Code", dataKey: "code" }, { title: "Type", dataKey: "type" }], data)}
             />
             <div className="mb-2">
-              <button className="btn btn-primary d-flex align-items-center" data-bs-toggle="modal" data-bs-target="#add_subject">
+              <button type="button" className="btn btn-primary d-flex align-items-center" onClick={openAddModal}>
                 <i className="ti ti-square-rounded-plus-filled me-2"></i>
                 Add Subject
               </button>
@@ -243,12 +264,12 @@ const SubjectList = () => {
       </div>
 
       {/* Add Modal */}
-      <div className="modal fade" id="add_subject">
+      <div className={`modal fade ${isAddModalOpen ? "show d-block" : ""}`} id="add_subject" aria-hidden={!isAddModalOpen} role="dialog">
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
               <h4 className="modal-title">Add Subject</h4>
-              <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
+              <button type="button" className="btn-close" onClick={closeAddModal}></button>
             </div>
             <form onSubmit={handleSave}>
               <div className="modal-body">
@@ -281,7 +302,7 @@ const SubjectList = () => {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" className="btn btn-light" onClick={closeAddModal}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={isSaving}>{isSaving ? "Saving..." : "Create Subject"}</button>
               </div>
             </form>
@@ -290,12 +311,12 @@ const SubjectList = () => {
       </div>
 
       {/* Edit Modal */}
-      <div className="modal fade" id="edit_subject">
+      <div className={`modal fade ${isEditModalOpen ? "show d-block" : ""}`} id="edit_subject" aria-hidden={!isEditModalOpen} role="dialog">
         <div className="modal-dialog modal-dialog-centered">
           <div className="modal-content">
             <div className="modal-header">
               <h4 className="modal-title">Edit Subject</h4>
-              <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
+              <button type="button" className="btn-close" onClick={closeEditModal}></button>
             </div>
             <form onSubmit={handleUpdate}>
               <div className="modal-body">
@@ -328,13 +349,14 @@ const SubjectList = () => {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" className="btn btn-light" onClick={closeEditModal}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={isSaving}>{isSaving ? "Updating..." : "Save Changes"}</button>
               </div>
             </form>
           </div>
         </div>
       </div>
+      {isAddModalOpen || isEditModalOpen ? <div className="modal-backdrop fade show"></div> : null}
     </div>
   );
 };
