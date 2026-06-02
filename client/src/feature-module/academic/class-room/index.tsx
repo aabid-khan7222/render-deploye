@@ -124,13 +124,42 @@ const ClassRoom = () => {
     printData("Class Rooms", exportColumns, exportRows);
   }, [exportRows, exportColumns]);
 
+  const cleanupModalArtifacts = () => {
+    window.setTimeout(() => {
+      document.querySelectorAll(".modal-backdrop").forEach((el) => el.remove());
+      document.body.classList.remove("modal-open");
+      document.body.style.removeProperty("overflow");
+      document.body.style.removeProperty("padding-right");
+    }, 150);
+  };
+
   const hideModal = (id: string) => {
-    const el = document.getElementById(id);
-    if (el && (window as any).bootstrap?.Modal) {
-      const modalApi = (window as any).bootstrap.Modal;
-      const modalInstance = modalApi.getInstance(el) ?? modalApi.getOrCreateInstance?.(el) ?? new modalApi(el);
-      modalInstance.hide();
+    const modalEl = document.getElementById(id);
+    if (!modalEl) return;
+
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
     }
+
+    const dismissBtn = modalEl.querySelector('[data-bs-dismiss="modal"]') as HTMLElement | null;
+    if (dismissBtn) {
+      dismissBtn.click();
+      cleanupModalArtifacts();
+      return;
+    }
+
+    const modalApi = (window as any).bootstrap?.Modal;
+    if (modalApi) {
+      const modalInstance = modalApi.getInstance(modalEl) ?? modalApi.getOrCreateInstance?.(modalEl) ?? new modalApi(modalEl);
+      modalInstance.hide();
+    } else {
+      modalEl.classList.remove("show");
+      modalEl.setAttribute("aria-hidden", "true");
+      modalEl.removeAttribute("aria-modal");
+      modalEl.removeAttribute("role");
+      (modalEl as HTMLElement).style.display = "none";
+    }
+    cleanupModalArtifacts();
   };
 
   const handleAddSubmit = async (e: React.FormEvent) => {
