@@ -2603,14 +2603,15 @@ const getAllStudents = async (req, res) => {
       ? `
         SELECT COUNT(*)::int AS total
         FROM students s
-        INNER JOIN (
+        LEFT JOIN (
           SELECT DISTINCT ON (l.student_id)
             l.student_id,
             l.to_academic_year_id
           FROM student_lifecycle_ledger l
           ORDER BY l.student_id, l.event_date DESC NULLS LAST, l.id DESC
-        ) ye ON ye.student_id = s.id AND ye.to_academic_year_id = $1
-        WHERE s.deleted_at IS NULL`
+        ) ye ON ye.student_id = s.id
+        WHERE s.deleted_at IS NULL
+          AND (ye.to_academic_year_id = $1 OR ye.student_id IS NULL)`
       : 'SELECT COUNT(*)::int as total FROM students WHERE deleted_at IS NULL';
     const countParams = hasAcademicYearFilter ? [academicYearId] : [];
     const countResult = await query(countQuery, countParams);
@@ -2650,7 +2651,7 @@ const getAllStudents = async (req, res) => {
         u.email,
         u.current_address AS address,
         s.user_id,
-        $1::int AS academic_year_id,
+        ll.academic_year_id AS academic_year_id,
         ll.academic_year_id AS latest_academic_year_id,
         ll.class_id,
         ll.section_id,
@@ -2669,12 +2670,13 @@ const getAllStudents = async (req, res) => {
         COALESCE(u.current_address, u.permanent_address) AS current_address,
         u.permanent_address AS permanent_address
       FROM students s
-      INNER JOIN latest_ledger ll ON ll.student_id = s.id AND ll.academic_year_id = $1
+      LEFT JOIN latest_ledger ll ON ll.student_id = s.id
       INNER JOIN users u ON u.id = s.user_id
       LEFT JOIN classes c ON ll.class_id = c.id
       LEFT JOIN sections sec ON ll.section_id = sec.id
       ${STUDENT_CONTACT_LATERAL_JOINS}
       WHERE s.deleted_at IS NULL
+        AND (ll.academic_year_id = $1 OR ll.student_id IS NULL)
       ORDER BY u.first_name ASC, u.last_name ASC
       LIMIT $2 OFFSET $3
     `

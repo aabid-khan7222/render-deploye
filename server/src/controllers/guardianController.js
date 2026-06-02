@@ -374,7 +374,7 @@ const getAllGuardians = async (req, res) => {
     }
 
     const yearIdx = queryParams.length + 1;
-    const yearWhere = hasYearFilter ? ` AND enr.academic_year_id = $${yearIdx}` : '';
+    const yearWhere = hasYearFilter ? ` AND (enr.academic_year_id = $${yearIdx} OR enr.academic_year_id IS NULL)` : '';
     const listParams = hasYearFilter ? [...queryParams, academicYearId] : queryParams;
 
     const result = await query(

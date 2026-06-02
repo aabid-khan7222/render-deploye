@@ -639,6 +639,60 @@ function getTemplateSql() {
 }
 
 /**
+ * Sample academic year in tenant_seed.sql must not be applied to new schools — each school
+ * creates its own session via the Academic Years UI. Strip that block at runtime so we do not
+ * need to edit the seed SQL file (which may still be used by other tooling).
+ */
+function stripDefaultAcademicYearFromTenantSeed(sql) {
+  const normalized = sql.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const withoutBlock = normalized.replace(
+    /--\s*1\.\s*Academic Year[\s\S]*?ON CONFLICT\s*\(\s*year_name\s*\)\s*DO NOTHING\s*;\s*/i,
+    '-- 1. Academic Year: omitted during school provisioning (created by school admin)\n\n'
+  );
+  if (withoutBlock === normalized && /INSERT\s+INTO\s+public\.academic_years/i.test(normalized)) {
+    console.warn(
+      '[provisioning] tenant_seed.sql still contains academic_years INSERT; pattern strip missed — review seed file'
+    );
+  }
+  return withoutBlock;
+}
+
+/**
+ * After provisioning, remove any default/sample academic years so the tenant starts with none.
+ * Safe on fresh tenants; skips with a warning if transactional data already references a year.
+ */
+async function clearProvisionedAcademicYears(pool) {
+  const tableRes = await pool.query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'academic_years'
+     LIMIT 1`
+  );
+  if (tableRes.rowCount === 0) return;
+
+  const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM public.academic_years');
+  const count = countRes.rows[0]?.c ?? 0;
+  if (count === 0) return;
+
+  try {
+    const del = await pool.query('DELETE FROM public.academic_years');
+    if (del.rowCount > 0) {
+      console.log(
+        `[provisioning] Removed ${del.rowCount} default academic year row(s); school will create its own session.`
+      );
+    }
+  } catch (err) {
+    if (err && err.code === '23503') {
+      console.warn(
+        '[provisioning] Could not remove default academic years: existing data references them. ' +
+          'Provision a template database without sample academic years for new schools.'
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
  * Gets the consolidated tenant seed SQL.
  */
 function getTenantSeedSql() {
@@ -650,7 +704,7 @@ function getTenantSeedSql() {
     console.error('[provisioning] tenant seed read failed:', e.message);
     throw new Error('Tenant seed SQL file could not be read.');
   }
-  return sql.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return stripDefaultAcademicYearFromTenantSeed(sql);
 }
 
 async function createTenantDatabase(dbName, schoolName = null) {
@@ -741,6 +795,10 @@ async function createTenantDatabase(dbName, schoolName = null) {
         [String(schoolName || '').trim() || 'School']
       );
     }
+
+    // Schools define their own academic sessions; never leave seed/template years behind.
+    await clearProvisionedAcademicYears(tenantPool);
+
     await tenantPool.query('COMMIT');
   } catch (err) {
     await tenantPool.query('ROLLBACK').catch(() => {});

@@ -455,7 +455,7 @@ const getAllParents = async (req, res) => {
     }
 
     const yearIdx = queryParams.length + 1;
-    const yearWhere = hasYearFilter ? ` AND enr.academic_year_id = $${yearIdx}` : '';
+    const yearWhere = hasYearFilter ? ` AND (enr.academic_year_id = $${yearIdx} OR enr.academic_year_id IS NULL)` : '';
     const countParams = hasYearFilter ? [...queryParams, academicYearId] : queryParams;
     const listParams = hasYearFilter ? [...queryParams, academicYearId, limit, offset] : [...queryParams, limit, offset];
     const limitOffsetIdx = hasYearFilter ? [yearIdx + 1, yearIdx + 2] : [yearIdx, yearIdx + 1];
