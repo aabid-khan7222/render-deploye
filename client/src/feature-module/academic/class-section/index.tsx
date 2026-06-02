@@ -41,10 +41,33 @@ function cleanupBootstrapModalArtifacts() {
   }, 150);
 }
 
+function hideModalByDismissClick(modalEl: HTMLElement | null) {
+  if (!modalEl) {
+    cleanupBootstrapModalArtifacts();
+    return;
+  }
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+  const dismissBtn = modalEl.querySelector('[data-bs-dismiss="modal"]') as HTMLElement | null;
+  if (dismissBtn) {
+    dismissBtn.click();
+  } else {
+    hideBootstrapModalByElement(modalEl);
+  }
+  cleanupBootstrapModalArtifacts();
+}
+
 function hideBootstrapModalByElement(modalEl: HTMLElement | null) {
   const bs = (window as any).bootstrap;
   if (modalEl && bs?.Modal?.getOrCreateInstance) {
     bs.Modal.getOrCreateInstance(modalEl).hide();
+  } else if (modalEl) {
+    modalEl.classList.remove("show");
+    modalEl.setAttribute("aria-hidden", "true");
+    modalEl.removeAttribute("aria-modal");
+    modalEl.removeAttribute("role");
+    modalEl.style.display = "none";
   }
   cleanupBootstrapModalArtifacts();
 }
@@ -63,6 +86,7 @@ function hideBootstrapModalAndWaitForClosed(modalEl: HTMLElement | null): Promis
     const bs = (window as any).bootstrap;
     const inst = bs?.Modal?.getOrCreateInstance?.(modalEl);
     if (!inst?.hide) {
+      hideModalByDismissClick(modalEl);
       cleanupBootstrapModalArtifacts();
       resolve();
       return;
@@ -219,10 +243,7 @@ const ClassSection = () => {
         class_room_id: "Select",
         description: "",
       });
-      if (document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
-      }
-      hideBootstrapModalByElement(document.getElementById("add_class_section"));
+      hideModalByDismissClick(document.getElementById("add_class_section"));
     } finally { setIsCreating(false); }
   };
 
@@ -255,40 +276,11 @@ const ClassSection = () => {
     );
     setEditDescription(section?.description != null ? String(section.description) : "");
     setEditSectionStatus(normalizeSectionActive(section?.is_active));
-
-    // Show modal using Bootstrap
-    const modalElement = document.getElementById('edit_class_section');
-    if (modalElement) {
-      // Use Bootstrap 5 modal API
-      const bootstrap = (window as any).bootstrap;
-      if (bootstrap && bootstrap.Modal) {
-        const modal = bootstrap.Modal.getInstance(modalElement);
-        if (modal) {
-          modal.show();
-        } else {
-          const newModal = new bootstrap.Modal(modalElement);
-          newModal.show();
-        }
-      }
-    }
   };
 
   // Handle delete button click
   const handleDeleteClick = (section: any) => {
     setSelectedSection(section);
-    const modalElement = document.getElementById('delete-modal');
-    if (modalElement) {
-      const bootstrap = (window as any).bootstrap;
-      if (bootstrap && bootstrap.Modal) {
-        const modal = bootstrap.Modal.getInstance(modalElement);
-        if (modal) {
-          modal.show();
-        } else {
-          const newModal = new bootstrap.Modal(modalElement);
-          newModal.show();
-        }
-      }
-    }
   };
 
   // Handle save edit form submission
@@ -332,10 +324,7 @@ const ClassSection = () => {
       const response = await apiService.updateSection(selectedSection.id, updateData);
 
       if (response && response.status === 'SUCCESS') {
-        if (document.activeElement instanceof HTMLElement) {
-          document.activeElement.blur();
-        }
-        hideBootstrapModalByElement(document.getElementById("edit_class_section"));
+        hideModalByDismissClick(document.getElementById("edit_class_section"));
 
         await refetch();
         setMessage('Section updated successfully');
@@ -572,35 +561,34 @@ const ClassSection = () => {
                 className="btn btn-white btn-icon btn-sm d-flex align-items-center justify-content-center rounded-circle p-0"
                 data-bs-toggle="dropdown" data-bs-boundary="viewport" data-bs-popper-config='{"strategy":"fixed"}'
                 aria-expanded="false"
+                onClick={(e) => e.preventDefault()}
               >
                 <i className="ti ti-dots-vertical fs-14" />
               </Link>
               <ul className="dropdown-menu dropdown-menu-end p-2">
                 <li>
-                  <Link
+                  <button
+                    type="button"
                     className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleEditClick(record.sectionData);
-                    }}
+                    data-bs-toggle="modal"
+                    data-bs-target="#edit_class_section"
+                    onClick={() => handleEditClick(record.sectionData)}
                   >
                     <i className="ti ti-edit-circle me-2" />
                     Edit
-                  </Link>
+                  </button>
                 </li>
                 <li>
-                  <Link
+                  <button
+                    type="button"
                     className="dropdown-item rounded-1"
-                    to="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleDeleteClick(record.sectionData);
-                    }}
+                    data-bs-toggle="modal"
+                    data-bs-target="#delete-modal"
+                    onClick={() => handleDeleteClick(record.sectionData)}
                   >
                     <i className="ti ti-trash-x me-2" />
                     Delete
-                  </Link>
+                  </button>
                 </li>
               </ul>
             </div>
