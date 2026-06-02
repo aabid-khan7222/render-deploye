@@ -15,7 +15,7 @@ import { useAccountsPaymentModes } from "./useAccountsPaymentModes";
 import { DatePicker } from "antd";
 import { all_routes } from "../router/all_routes";
 import TooltipOption from "../../core/common/tooltipOption";
-import { apiService } from "../../core/services/apiService";
+import { apiService, getApiBaseUrl } from "../../core/services/apiService";
 import { formatDateMonthDayYear, formatUsdDisplay, toYmdString } from "../../core/utils/dateDisplay";
 import { selectSelectedAcademicYearId } from "../../core/data/redux/academicYearSlice";
 import { getAccountsErrorMessage } from "./accountsApiErrors";
@@ -62,6 +62,27 @@ const Expense = () => {
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [sortBy, setSortBy] = useState("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [apiOrigin, setApiOrigin] = useState("");
+
+  const toAbsoluteStorageUrl = useCallback(
+    (path: string) => {
+      const raw = String(path || "").trim();
+      if (!raw) return "";
+      if (/^https?:\/\//i.test(raw)) return raw;
+      if (!apiOrigin) {
+        if (raw.startsWith("/")) return raw;
+        return `/api/storage/files/${raw.replace(/^\/+/, "")}`;
+      }
+      if (raw.startsWith("/storage/files/")) return `${apiOrigin}/api${raw}`;
+      if (raw.startsWith("storage/files/")) return `${apiOrigin}/api/${raw}`;
+      if (raw.startsWith("api/storage/files/")) return `${apiOrigin}/${raw}`;
+      if (raw.startsWith("/api/")) return `${apiOrigin}${raw}`;
+      if (raw.startsWith("school_")) return `${apiOrigin}/api/storage/files/${raw}`;
+      if (raw.startsWith("/")) return `${apiOrigin}${raw}`;
+      return `${apiOrigin}/api/storage/files/${raw}`;
+    },
+    [apiOrigin]
+  );
 
   const sortOrderFor = (field: string) =>
     sortBy === field ? (sortDir === "asc" ? ("ascend" as const) : ("descend" as const)) : null;
@@ -130,6 +151,22 @@ const Expense = () => {
       cancelled = true;
     };
   }, [academicYearId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const base = await getApiBaseUrl();
+        const origin = new URL(base, window.location.origin).origin;
+        if (!cancelled) setApiOrigin(origin);
+      } catch {
+        if (!cancelled) setApiOrigin("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const showModal = (id: string) => {
     const el = document.getElementById(id);
@@ -440,7 +477,7 @@ const Expense = () => {
         ),
       },
     ],
-    [openEdit, openDelete, sortBy, sortDir]
+    [openEdit, openDelete, sortBy, sortDir, toAbsoluteStorageUrl]
   );
 
   const onFilterSubmit = (e: React.FormEvent) => {
@@ -1037,7 +1074,7 @@ const Expense = () => {
                               href={
                                 selectedRecord.raw.file_path.startsWith("http")
                                   ? selectedRecord.raw.file_path
-                                  : `/api/storage/files/${selectedRecord.raw.file_path}`
+                                  : toAbsoluteStorageUrl(selectedRecord.raw.file_path)
                               }
                               target="_blank"
                               rel="noopener noreferrer"

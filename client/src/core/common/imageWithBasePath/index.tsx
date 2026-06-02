@@ -1,6 +1,7 @@
 
 import { useState, useEffect, type CSSProperties } from 'react';
 import { img_path} from '../../../environment';
+import { apiService } from '../../services/apiService';
 
 function resolveInitialSrc(raw: string): string {
   const s = (raw || '').trim();
@@ -31,8 +32,26 @@ const ImageWithBasePath = (props: Image) => {
   const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     setHasError(false);
-    setImgSrc(resolveInitialSrc(props.src));
+    const nextSrc = resolveInitialSrc(props.src);
+    if (/^https?:\/\//i.test(nextSrc)) {
+      setImgSrc(nextSrc);
+      return () => {
+        cancelled = true;
+      };
+    }
+    (async () => {
+      try {
+        const resolved = await apiService.resolveAvatarUrl(nextSrc);
+        if (!cancelled && resolved) setImgSrc(resolved);
+      } catch {
+        if (!cancelled) setImgSrc(nextSrc);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [props.src]);
 
   // Function to get default avatar based on gender

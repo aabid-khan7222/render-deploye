@@ -16,7 +16,7 @@ import { DatePicker } from "antd";
 import { all_routes } from "../router/all_routes";
 import TooltipOption from "../../core/common/tooltipOption";
 import ImageWithBasePath from "../../core/common/imageWithBasePath";
-import { apiService } from "../../core/services/apiService";
+import { apiService, getApiBaseUrl } from "../../core/services/apiService";
 import { formatDateMonthDayYear, formatUsdDisplay, toYmdString } from "../../core/utils/dateDisplay";
 import { selectSelectedAcademicYearId } from "../../core/data/redux/academicYearSlice";
 import { getAccountsErrorMessage } from "./accountsApiErrors";
@@ -68,6 +68,27 @@ const AccountsIncome = () => {
   const [sortBy, setSortBy] = useState("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
+  const [apiOrigin, setApiOrigin] = useState("");
+
+  const toAbsoluteStorageUrl = useCallback(
+    (path: string) => {
+      const raw = String(path || "").trim();
+      if (!raw) return "";
+      if (/^https?:\/\//i.test(raw)) return raw;
+      if (!apiOrigin) {
+        if (raw.startsWith("/")) return raw;
+        return `/api/storage/files/${raw.replace(/^\/+/, "")}`;
+      }
+      if (raw.startsWith("/storage/files/")) return `${apiOrigin}/api${raw}`;
+      if (raw.startsWith("storage/files/")) return `${apiOrigin}/api/${raw}`;
+      if (raw.startsWith("api/storage/files/")) return `${apiOrigin}/${raw}`;
+      if (raw.startsWith("/api/")) return `${apiOrigin}${raw}`;
+      if (raw.startsWith("school_")) return `${apiOrigin}/api/storage/files/${raw}`;
+      if (raw.startsWith("/")) return `${apiOrigin}${raw}`;
+      return `${apiOrigin}/api/storage/files/${raw}`;
+    },
+    [apiOrigin]
+  );
 
   const sortOrderFor = (field: string) =>
     sortBy === field ? (sortDir === "asc" ? ("ascend" as const) : ("descend" as const)) : null;
@@ -127,6 +148,22 @@ const AccountsIncome = () => {
       cancelled = true;
     };
   }, [academicYearId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const base = await getApiBaseUrl();
+        const origin = new URL(base, window.location.origin).origin;
+        if (!cancelled) setApiOrigin(origin);
+      } catch {
+        if (!cancelled) setApiOrigin("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const showModal = (id: string) => {
     const el = document.getElementById(id);
@@ -380,11 +417,7 @@ const AccountsIncome = () => {
           const fileName = record.raw?.document_name || "Download";
           if (!filePath) return <span className="text-muted">-</span>;
 
-          const url = filePath.startsWith("http")
-            ? filePath
-            : filePath.startsWith("school_")
-            ? `/api/storage/files/${filePath}`
-            : `/api/storage/files/${filePath}`;
+          const url = toAbsoluteStorageUrl(filePath);
 
           return (
             <a
@@ -447,7 +480,7 @@ const AccountsIncome = () => {
         ),
       },
     ],
-    [openView, openEdit, openDelete, sortBy, sortDir]
+    [openView, openEdit, openDelete, sortBy, sortDir, toAbsoluteStorageUrl]
   );
 
   const onFilterSubmit = (e: React.FormEvent) => {
@@ -1055,7 +1088,7 @@ const AccountsIncome = () => {
                               href={
                                 selectedRecord.raw.file_path.startsWith("http")
                                   ? selectedRecord.raw.file_path
-                                  : `/api/storage/files/${selectedRecord.raw.file_path}`
+                                  : toAbsoluteStorageUrl(selectedRecord.raw.file_path)
                               }
                               target="_blank"
                               rel="noopener noreferrer"
