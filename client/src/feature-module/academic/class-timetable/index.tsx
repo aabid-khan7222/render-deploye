@@ -183,6 +183,7 @@ function TimetableCell({
         className="align-top p-2"
         style={{ minWidth: 170, maxWidth: 280 }}
         data-slot-clickable="true"
+        onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="small text-muted mb-2 border-bottom pb-1">
           <span>{slot.start}{slot.end ? ` – ${slot.end}` : ""}</span>
@@ -196,6 +197,7 @@ function TimetableCell({
             transition: "all 0.2s ease-in-out"
           }}
           onClick={onEditClick}
+          onMouseDown={(e) => e.stopPropagation()}
           role="button"
           tabIndex={0}
           onKeyDown={(e) => {
@@ -238,6 +240,7 @@ function TimetableCell({
       role="button"
       tabIndex={0}
       data-slot-clickable="true"
+      onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -770,6 +773,44 @@ const ClassTimetable = () => {
   const [modalDrafts, setModalDrafts] = useState<CellDraft[]>([]);
   const [modalError, setModalError] = useState<string>("");
 
+  const showModal = useCallback(async (modalId: string) => {
+    const el = document.getElementById(modalId);
+    if (!el) return;
+
+    const winModal = (window as any).bootstrap?.Modal;
+    if (winModal?.getOrCreateInstance) {
+      winModal.getOrCreateInstance(el).show();
+      return;
+    }
+
+    try {
+      const mod = await import("bootstrap/js/dist/modal");
+      mod.default.getOrCreateInstance(el).show();
+    } catch {
+      // Silent fallback: if bootstrap modal cannot load, we keep state ready.
+    }
+  }, []);
+
+  const hideModal = useCallback(async (modalId: string) => {
+    const el = document.getElementById(modalId);
+    if (!el) return;
+
+    const winModal = (window as any).bootstrap?.Modal;
+    if (winModal?.getOrCreateInstance) {
+      const inst = winModal.getInstance(el) ?? winModal.getOrCreateInstance(el);
+      inst?.hide();
+      return;
+    }
+
+    try {
+      const mod = await import("bootstrap/js/dist/modal");
+      const inst = mod.default.getInstance(el) ?? mod.default.getOrCreateInstance(el);
+      inst?.hide();
+    } catch {
+      // Silent fallback: non-fatal for data edits.
+    }
+  }, []);
+
   const validateElectiveGroupConflict = useCallback((draftsList: CellDraft[]): { valid: boolean; reason: string } => {
     if (draftsList.length <= 1) return { valid: true, reason: "" };
 
@@ -809,13 +850,8 @@ const ClassTimetable = () => {
 
     const current = cellDrafts[key] || [];
     setModalDrafts(JSON.parse(JSON.stringify(current)));
-
-    const el = document.getElementById("edit_slot_modal");
-    if (el) {
-      const inst = (window as any).bootstrap?.Modal?.getOrCreateInstance(el);
-      inst?.show();
-    }
-  }, [cellDrafts]);
+    void showModal("edit_slot_modal");
+  }, [cellDrafts, showModal]);
 
   const updateModalDraft = useCallback((index: number, patch: Partial<CellDraft>) => {
     setModalDrafts((prev) => {
@@ -968,12 +1004,8 @@ const ClassTimetable = () => {
       return { ...prev, [editingCellKey]: updatedList };
     });
 
-    const el = document.getElementById("edit_slot_modal");
-    if (el) {
-      const inst = (window as any).bootstrap?.Modal?.getInstance(el);
-      inst?.hide();
-    }
-  }, [editingCellKey, modalDrafts, modalError, initialCellDrafts]);
+    void hideModal("edit_slot_modal");
+  }, [editingCellKey, modalDrafts, modalError, initialCellDrafts, hideModal]);
 
   const handleResetRoutine = async () => {
     if (!selectionReady) return;
@@ -1015,11 +1047,7 @@ const ClassTimetable = () => {
         academic_year_id: academicYearId,
       });
 
-      const el = document.getElementById("copy_routine_modal");
-      if (el) {
-        const inst = (window as any).bootstrap?.Modal?.getInstance(el);
-        inst?.hide();
-      }
+      void hideModal("copy_routine_modal");
 
       await refetch();
       void Swal.fire({
