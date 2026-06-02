@@ -1,13 +1,19 @@
 const { LocalFilesystemStorageProvider } = require('./LocalFilesystemStorageProvider');
+const { CloudinaryStorageProvider } = require('./CloudinaryStorageProvider');
 
 let singleton = null;
 
 /**
- * Future: STORAGE_DRIVER=s3 → return S3 provider.
+ * Select storage provider from env.
  */
 function getStorageProvider() {
   if (!singleton) {
-    singleton = new LocalFilesystemStorageProvider();
+    const driver = String(process.env.STORAGE_DRIVER || 'local').trim().toLowerCase();
+    if (driver === 'cloudinary') {
+      singleton = new CloudinaryStorageProvider();
+    } else {
+      singleton = new LocalFilesystemStorageProvider();
+    }
   }
   return singleton;
 }
@@ -15,4 +21,5 @@ function getStorageProvider() {
 module.exports = {
   getStorageProvider,
   LocalFilesystemStorageProvider,
+  CloudinaryStorageProvider,
 };
