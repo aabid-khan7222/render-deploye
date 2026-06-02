@@ -606,6 +606,61 @@ async function getTableColumns(client, tableName) {
   return new Set((r.rows || []).map((x) => String(x.column_name)));
 }
 
+async function clientHasTable(client, tableName) {
+  const t = String(tableName || '').trim().toLowerCase();
+  if (!t) return false;
+  const r = await client.query(
+    `SELECT 1
+     FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = $1
+     LIMIT 1`,
+    [t]
+  );
+  return (r.rows || []).length > 0;
+}
+
+/** Same SELECT shape as GET /auth/me — safe across tenant schema variants. */
+async function fetchMeUserRow(client, userId) {
+  const me = await client.query(
+    `SELECT 
+      u.*,
+      s.id AS student_id,
+      u.first_name AS student_first_name,
+      u.last_name AS student_last_name,
+      (s.status = 'Active') AS student_is_active,
+      c.class_name,
+      sec.section_name,
+      st.id AS staff_id,
+      u.first_name AS staff_first_name,
+      u.last_name AS staff_last_name,
+      (st.deleted_at IS NULL AND LOWER(st.status) = 'active') AS staff_is_active,
+      d.designation_name,
+      ur.role_name
+    FROM users u
+    LEFT JOIN students s ON u.id = s.user_id
+    ${lateralCurrentEnrollment('s.id')}
+    LEFT JOIN classes c ON enr.class_id = c.id
+    LEFT JOIN sections sec ON enr.section_id = sec.id
+    LEFT JOIN staff st ON u.id = st.user_id
+    LEFT JOIN designations d ON st.designation_id = d.id
+    LEFT JOIN user_roles ur ON u.role_id = ur.id
+    WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL`,
+    [userId]
+  );
+  return me.rows[0] || null;
+}
+
+function normalizeProfileTextField(value) {
+  if (value === undefined) return undefined;
+  const s = String(value).trim();
+  return s === '' ? 'Not Provided' : s;
+}
+
+function normalizeProfileNameField(value) {
+  if (value === undefined) return undefined;
+  return String(value).trim();
+}
+
 function normalizeMyAvatarPath(rawAvatar, schoolId) {
   // Some tenant schemas keep users.avatar as NOT NULL; use empty string as "no avatar".
   if (rawAvatar == null) return '';
@@ -690,15 +745,19 @@ const updateMe = async (req, res) => {
         userParams.push(val);
       };
 
-      if (userCols.has('first_name') && first_name !== undefined) pushUser('first_name', first_name || null);
-      if (userCols.has('last_name') && last_name !== undefined) pushUser('last_name', last_name || null);
+      const normFirst = normalizeProfileNameField(first_name);
+      const normLast = normalizeProfileNameField(last_name);
+      if (userCols.has('first_name') && normFirst !== undefined) pushUser('first_name', normFirst || null);
+      if (userCols.has('last_name') && normLast !== undefined) pushUser('last_name', normLast || null);
       if (userCols.has('email') && email !== undefined) pushUser('email', email || null);
       if (userCols.has('phone') && phone !== undefined) pushUser('phone', phone || null);
-      if (userCols.has('current_address') && current_address !== undefined) {
-        pushUser('current_address', current_address || null);
+      const normCurrentAddress = normalizeProfileTextField(current_address);
+      const normPermanentAddress = normalizeProfileTextField(permanent_address);
+      if (userCols.has('current_address') && normCurrentAddress !== undefined) {
+        pushUser('current_address', normCurrentAddress);
       }
-      if (userCols.has('permanent_address') && permanent_address !== undefined) {
-        pushUser('permanent_address', permanent_address || null);
+      if (userCols.has('permanent_address') && normPermanentAddress !== undefined) {
+        pushUser('permanent_address', normPermanentAddress);
       }
       if (userCols.has('avatar') && normalizedAvatar !== undefined) {
         pushUser('avatar', normalizedAvatar);
@@ -713,14 +772,20 @@ const updateMe = async (req, res) => {
       }
 
       // If this user is a student/staff, keep their person-name in sync when requested
-      const hasNameUpdate = first_name !== undefined || last_name !== undefined;
+      const hasNameUpdate = normFirst !== undefined || normLast !== undefined;
       if (hasNameUpdate && link.student_id != null && studentCols.has('first_name') && studentCols.has('last_name')) {
-        const sFirst = first_name !== undefined ? (first_name || null) : undefined;
-        const sLast = last_name !== undefined ? (last_name || null) : undefined;
+        const sFirst = normFirst !== undefined ? normFirst : undefined;
+        const sLast = normLast !== undefined ? normLast : undefined;
         const sUpdates = [];
         const sParams = [];
-        if (sFirst !== undefined) { sUpdates.push(`first_name = $${sParams.length + 1}`); sParams.push(sFirst); }
-        if (sLast !== undefined) { sUpdates.push(`last_name = $${sParams.length + 1}`); sParams.push(sLast); }
+        if (sFirst !== undefined && sFirst !== '') {
+          sUpdates.push(`first_name = $${sParams.length + 1}`);
+          sParams.push(sFirst);
+        }
+        if (sLast !== undefined && sLast !== '') {
+          sUpdates.push(`last_name = $${sParams.length + 1}`);
+          sParams.push(sLast);
+        }
         if (sUpdates.length > 0) {
           sParams.push(userId);
           await client.query(
@@ -731,12 +796,18 @@ const updateMe = async (req, res) => {
       }
 
       if (hasNameUpdate && link.staff_id != null && staffCols.has('first_name') && staffCols.has('last_name')) {
-        const tFirst = first_name !== undefined ? (first_name || null) : undefined;
-        const tLast = last_name !== undefined ? (last_name || null) : undefined;
+        const tFirst = normFirst !== undefined ? normFirst : undefined;
+        const tLast = normLast !== undefined ? normLast : undefined;
         const tUpdates = [];
         const tParams = [];
-        if (tFirst !== undefined) { tUpdates.push(`first_name = $${tParams.length + 1}`); tParams.push(tFirst); }
-        if (tLast !== undefined) { tUpdates.push(`last_name = $${tParams.length + 1}`); tParams.push(tLast); }
+        if (tFirst !== undefined && tFirst !== '') {
+          tUpdates.push(`first_name = $${tParams.length + 1}`);
+          tParams.push(tFirst);
+        }
+        if (tLast !== undefined && tLast !== '') {
+          tUpdates.push(`last_name = $${tParams.length + 1}`);
+          tParams.push(tLast);
+        }
         if (tUpdates.length > 0) {
           tParams.push(userId);
           await client.query(
@@ -746,75 +817,43 @@ const updateMe = async (req, res) => {
         }
       }
 
-      // Address: update latest row if exists, else insert a new one.
-      // Return fresh /auth/me-like payload by calling getMe-like query (but within same client)
-      let me;
-      try {
-        me = await client.query(
-          `SELECT 
-            u.*,
-            s.id AS student_id,
-            u.first_name AS student_first_name,
-            u.last_name AS student_last_name,
-            (s.status = 'Active') AS student_is_active,
-            c.class_name,
-            sec.section_name,
-            st.id AS staff_id,
-            u.first_name AS staff_first_name,
-            u.last_name AS staff_last_name,
-            (st.deleted_at IS NULL AND st.status = 'Active') AS staff_is_active,
-            d.designation_name,
-            ur.role_name,
-            addr.address_id,
-            addr.current_address,
-            addr.permanent_address
-          FROM users u
-          LEFT JOIN students s ON u.id = s.user_id
-          ${lateralCurrentEnrollment('s.id')}
-          LEFT JOIN classes c ON enr.class_id = c.id
-          LEFT JOIN sections sec ON enr.section_id = sec.id
-          LEFT JOIN staff st ON u.id = st.user_id
-          LEFT JOIN designations d ON st.designation_id = d.id
-          LEFT JOIN user_roles ur ON u.role_id = ur.id
-          LEFT JOIN LATERAL (
-            SELECT id AS address_id, current_address, permanent_address
-            FROM addresses
-            WHERE user_id = u.id
-            ORDER BY id DESC
-            LIMIT 1
-          ) addr ON true
-          WHERE u.id = $1 AND u.is_active = true`,
+      // Optional addresses table: keep latest row in sync when present (no schema assumptions).
+      const hasAddressPayload =
+        normCurrentAddress !== undefined || normPermanentAddress !== undefined;
+      if (hasAddressPayload && (await clientHasTable(client, 'addresses'))) {
+        const latestAddr = await client.query(
+          `SELECT id FROM addresses WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
           [userId]
         );
-      } catch (e) {
-        me = await client.query(
-          `SELECT 
-            u.*,
-            s.id AS student_id,
-            u.first_name AS student_first_name,
-            u.last_name AS student_last_name,
-            (s.status = 'Active') AS student_is_active,
-            c.class_name,
-            sec.section_name,
-            st.id AS staff_id,
-            u.first_name AS staff_first_name,
-            u.last_name AS staff_last_name,
-            (st.deleted_at IS NULL AND LOWER(st.status) = 'active') AS staff_is_active,
-            d.designation_name,
-            ur.role_name
-          FROM users u
-          LEFT JOIN students s ON u.id = s.user_id
-          ${lateralCurrentEnrollment('s.id')}
-          LEFT JOIN classes c ON enr.class_id = c.id
-          LEFT JOIN sections sec ON enr.section_id = sec.id
-          LEFT JOIN staff st ON u.id = st.user_id
-          LEFT JOIN designations d ON st.designation_id = d.id
-          LEFT JOIN user_roles ur ON u.role_id = ur.id
-          WHERE u.id = $1 AND u.is_active = true`,
-          [userId]
-        );
+        if (latestAddr.rows.length > 0) {
+          const addrUpdates = [];
+          const addrParams = [];
+          if (normCurrentAddress !== undefined) {
+            addrUpdates.push(`current_address = $${addrParams.length + 1}`);
+            addrParams.push(normCurrentAddress);
+          }
+          if (normPermanentAddress !== undefined) {
+            addrUpdates.push(`permanent_address = $${addrParams.length + 1}`);
+            addrParams.push(normPermanentAddress);
+          }
+          if (addrUpdates.length > 0) {
+            addrParams.push(latestAddr.rows[0].id, userId);
+            await client.query(
+              `UPDATE addresses SET ${addrUpdates.join(', ')}
+               WHERE id = $${addrParams.length - 1} AND user_id = $${addrParams.length}`,
+              addrParams
+            );
+          }
+        } else if (normCurrentAddress !== undefined && normPermanentAddress !== undefined && link.role_id != null) {
+          await client.query(
+            `INSERT INTO addresses (current_address, permanent_address, user_id, role_id, created_at)
+             VALUES ($1, $2, $3, $4, NOW())`,
+            [normCurrentAddress, normPermanentAddress, userId, link.role_id]
+          );
+        }
       }
-      return me.rows[0] || null;
+
+      return fetchMeUserRow(client, userId);
     });
 
     if (!resultUser) {
@@ -858,6 +897,9 @@ const updateMe = async (req, res) => {
 
     success(res, 200, 'Profile updated', userData);
   } catch (err) {
+    if (err && err.code === '23505') {
+      return errorResponse(res, 409, 'Email is already in use');
+    }
     console.error('UpdateMe error:', err);
     errorResponse(res, 500, 'Failed to update profile');
   }
