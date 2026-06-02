@@ -658,6 +658,25 @@ function stripDefaultAcademicYearFromTenantSeed(sql) {
 }
 
 /**
+ * Sample timetable periods in tenant_seed.sql must not be applied to new schools — each school
+ * defines its own working day and periods under Timetable → Time slots. Strip that block at
+ * runtime so we do not need to edit the seed SQL file directly (which may be reused elsewhere).
+ */
+function stripDefaultTimeSlotsFromTenantSeed(sql) {
+  const normalized = sql.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const withoutBlock = normalized.replace(
+    /--\s*13\.\s*Time\s+Slots[\s\S]*?INSERT\s+INTO\s+public\.timetable_time_slots[\s\S]*?WHERE\s+NOT\s+EXISTS\s*\([\s\S]*?timetable_time_slots[\s\S]*?\);\s*/i,
+    '-- 13. Time Slots: omitted during school provisioning (created by school admin)\n\n'
+  );
+  if (withoutBlock === normalized && /INSERT\s+INTO\s+public\.timetable_time_slots/i.test(normalized)) {
+    console.warn(
+      '[provisioning] tenant_seed.sql still contains timetable_time_slots INSERT; pattern strip missed — review seed file'
+    );
+  }
+  return withoutBlock;
+}
+
+/**
  * After provisioning, remove any default/sample academic years so the tenant starts with none.
  * Safe on fresh tenants; skips with a warning if transactional data already references a year.
  */
@@ -704,7 +723,12 @@ function getTenantSeedSql() {
     console.error('[provisioning] tenant seed read failed:', e.message);
     throw new Error('Tenant seed SQL file could not be read.');
   }
-  return stripDefaultAcademicYearFromTenantSeed(sql);
+  // Never provision demo academic years or demo time slots for new schools; they must be
+  // created explicitly from the UI. We strip those blocks at runtime without modifying
+  // the underlying SQL file on disk.
+  let out = stripDefaultAcademicYearFromTenantSeed(sql);
+  out = stripDefaultTimeSlotsFromTenantSeed(out);
+  return out;
 }
 
 async function createTenantDatabase(dbName, schoolName = null) {
