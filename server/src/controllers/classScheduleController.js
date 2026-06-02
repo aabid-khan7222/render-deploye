@@ -13,6 +13,24 @@ const {
 } = require('../utils/accessControl');
 const { ROLES } = require('../config/roles');
 const { lateralCurrentEnrollment } = require('../utils/studentEnrollmentSql');
+const { getStudentsActiveWhereSql } = require('../utils/libraryPersonScope');
+
+/** Cached per-process: students active filter with table alias (tenant may use status vs is_active). */
+let wardStudentActiveWhereSql = null;
+
+async function wardStudentActiveWhere(alias = 's') {
+  if (wardStudentActiveWhereSql) return wardStudentActiveWhereSql;
+  const raw = await getStudentsActiveWhereSql();
+  if (raw === 'TRUE') {
+    wardStudentActiveWhereSql = 'TRUE';
+    return wardStudentActiveWhereSql;
+  }
+  wardStudentActiveWhereSql = raw
+    .replace(/\bis_active\b/g, `${alias}.is_active`)
+    .replace(/\bdeleted_at\b/g, `${alias}.deleted_at`)
+    .replace(/\bstatus\b/g, `${alias}.status`);
+  return wardStudentActiveWhereSql;
+}
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_TO_INT = {
@@ -434,6 +452,7 @@ async function buildScopedWhere(req, academicYearId, extraFilters = {}) {
     if (!wardIds.length) {
       return { where: `${where} AND 1=0`, params, ctx };
     }
+    const studentActiveSql = await wardStudentActiveWhere('s');
     // Class/section live on student_lifecycle_ledger (enr.*), not on students.* (cast_id is unrelated).
     // Use latest enrollment (no to_academic_year_id filter), same as resolveStudentScopeForUser / canAccessClass for parents.
     // Timetable rows are already restricted by class_schedules.academic_year_id = $1 above.
@@ -441,8 +460,7 @@ async function buildScopedWhere(req, academicYearId, extraFilters = {}) {
       SELECT 1 FROM students s
       ${lateralCurrentEnrollment('s.id')}
       WHERE s.id = ANY($${p}::int[])
-        AND s.deleted_at IS NULL
-        AND COALESCE(s.is_active, true) = true
+        AND (${studentActiveSql})
         AND enr.class_id IS NOT NULL
         AND enr.class_id = class_schedules.class_id
         AND (
@@ -500,12 +518,12 @@ async function assertCanReadScheduleRow(req, row) {
     const classSectionId = parseId(row.class_section_id);
     if (!classIdRow) return { ok: false, status: 403, message: 'Access denied' };
 
+    const studentActiveSql = await wardStudentActiveWhere('s');
     const r2 = await query(
       `SELECT 1 FROM students s
        ${lateralCurrentEnrollment('s.id')}
        WHERE s.id = ANY($1::int[])
-         AND s.deleted_at IS NULL
-         AND COALESCE(s.is_active, true) = true
+         AND (${studentActiveSql})
          AND enr.class_id IS NOT NULL
          AND enr.class_id = $2
          AND (
@@ -928,12 +946,12 @@ const getTimetableClass = async (req, res) => {
         }
       } else if (isParentOrGuardianPortalRole(ctx)) {
         const wardIds = await resolveWardStudentIdsForUser(req);
+        const studentActiveSql = await wardStudentActiveWhere('s');
         const secOk = await query(
           `SELECT 1 FROM students s
            ${lateralCurrentEnrollment('s.id')}
            WHERE s.id = ANY($1::int[])
-             AND s.deleted_at IS NULL
-             AND COALESCE(s.is_active, true) = true
+             AND (${studentActiveSql})
              AND enr.class_id IS NOT NULL
              AND enr.class_id = $2
              AND enr.section_id IS NOT DISTINCT FROM $3
