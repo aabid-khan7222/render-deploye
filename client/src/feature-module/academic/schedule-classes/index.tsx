@@ -5,7 +5,6 @@ import Table from "../../../core/common/dataTable/index";
 import { useSchedules } from "../../../core/hooks/useSchedules";
 import { apiService } from "../../../core/services/apiService";
 import PredefinedDateRanges from "../../../core/common/datePicker";
-import { activeList } from "../../../core/common/selectoption/selectoption";
 import CommonSelect from "../../../core/common/commonSelect";
 import type { TableData } from "../../../core/data/interface";
 import { Link } from "react-router-dom";
@@ -155,6 +154,36 @@ type EditRow = {
   originalData?: any;
 };
 
+type TableSortMode = "none" | "nameAsc" | "nameDesc" | "recentId";
+
+const STATUS_FILTER_OPTIONS = [
+  { value: "__all__", label: "All statuses" },
+  { value: "Active", label: "Active" },
+  { value: "Inactive", label: "Inactive" },
+];
+
+const SLOT_TYPE_FILTER_OPTIONS = [
+  { value: "__all__", label: "All types" },
+  { value: "period", label: "Period" },
+  { value: "break", label: "Break" },
+];
+
+function rowStartTimeMinutes(row: any): number {
+  const o = row?.originalData || {};
+  if (o.start_time != null) {
+    const m = parsePgTimeToDayjs(String(o.start_time));
+    if (m?.isValid()) return m.hour() * 60 + m.minute();
+  }
+  const d = parseDisplayTimeToDayjs(row?.startTime);
+  return d?.isValid() ? d.hour() * 60 + d.minute() : 0;
+}
+
+function rowNumericId(row: any): number {
+  const raw = row?.originalData?.id ?? row?.id ?? row?.key ?? 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
 const ScheduleClasses = () => {
   const { data: apiData, loading, error, refetch, fallbackData } = useSchedules();
   const data = loading ? fallbackData : (apiData ?? fallbackData ?? []);
@@ -204,6 +233,49 @@ const ScheduleClasses = () => {
   });
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [filterSlotName, setFilterSlotName] = useState("");
+  const [filterSlotNameDraft, setFilterSlotNameDraft] = useState("");
+  const [filterStatus, setFilterStatus] = useState<string>("__all__");
+  const [filterSlotType, setFilterSlotType] = useState<string>("__all__");
+  const [tableSort, setTableSort] = useState<TableSortMode>("none");
+
+  const displayData = useMemo(() => {
+    if (!Array.isArray(data)) return [];
+    const nameQ = filterSlotName.trim().toLowerCase();
+    let rows = data.filter((row: any) => {
+      if (nameQ) {
+        const label = String(row.type ?? "").toLowerCase();
+        if (!label.includes(nameQ)) return false;
+      }
+      if (filterStatus !== "__all__" && row.status !== filterStatus) return false;
+      if (filterSlotType !== "__all__") {
+        const isBr = Boolean(row.originalData?.is_break ?? row.originalData?.isBreak ?? row.isBreak);
+        if (filterSlotType === "break" && !isBr) return false;
+        if (filterSlotType === "period" && isBr) return false;
+      }
+      return true;
+    });
+    rows = [...rows];
+    if (tableSort === "nameAsc") {
+      rows.sort((a, b) =>
+        String(a.type ?? "").localeCompare(String(b.type ?? ""), undefined, { sensitivity: "base" })
+      );
+    } else if (tableSort === "nameDesc") {
+      rows.sort((a, b) =>
+        String(b.type ?? "").localeCompare(String(a.type ?? ""), undefined, { sensitivity: "base" })
+      );
+    } else if (tableSort === "recentId") {
+      rows.sort((a, b) => rowNumericId(b) - rowNumericId(a));
+    } else {
+      rows.sort((a, b) => {
+        const ta = rowStartTimeMinutes(a);
+        const tb = rowStartTimeMinutes(b);
+        if (ta !== tb) return ta - tb;
+        return rowNumericId(a) - rowNumericId(b);
+      });
+    }
+    return rows;
+  }, [data, filterSlotName, filterStatus, filterSlotType, tableSort]);
 
   useEffect(() => {
     if (editingRow) {
@@ -337,10 +409,20 @@ const ScheduleClasses = () => {
     }
   };
 
-  const handleApplyClick = () => {
+  const handleApplyClick = (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    setFilterSlotName(filterSlotNameDraft.trim());
     if (dropdownMenuRef.current) {
       dropdownMenuRef.current.classList.remove("show");
     }
+  };
+
+  const handleResetFilters = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setFilterSlotName("");
+    setFilterSlotNameDraft("");
+    setFilterStatus("__all__");
+    setFilterSlotType("__all__");
   };
 
   const handleCreateSchedule = async (e: React.FormEvent) => {
@@ -482,7 +564,7 @@ const ScheduleClasses = () => {
 
   const exportData = useMemo(
     () =>
-      (Array.isArray(data) ? data : []).map((row: any) => {
+      displayData.map((row: any) => {
         const original = row?.originalData ?? {};
         const isBreak = Boolean(original.is_break ?? original.isBreak);
         return {
@@ -495,7 +577,7 @@ const ScheduleClasses = () => {
           status: row?.status ?? "-",
         };
       }),
-    [data]
+    [displayData]
   );
 
   const exportColumns = useMemo(
@@ -561,26 +643,34 @@ const ScheduleClasses = () => {
           </Link>
         </>
       ),
-      sorter: (a: TableData, b: TableData) =>
-        String(a.id || "").length - String(b.id || "").length,
+      sorter: (a: TableData, b: TableData) => rowNumericId(a) - rowNumericId(b),
     },
     {
       title: "Slot name",
       dataIndex: "type",
       sorter: (a: TableData, b: TableData) =>
-        String(a.type || "").length - String(b.type || "").length,
+        String(a.type || "").localeCompare(String(b.type || ""), undefined, { sensitivity: "base" }),
     },
     {
       title: "Start Time",
       dataIndex: "startTime",
-      sorter: (a: TableData, b: TableData) =>
-        String(a.startTime || "").length - String(b.startTime || "").length,
+      sorter: (a: TableData, b: TableData) => rowStartTimeMinutes(a) - rowStartTimeMinutes(b),
     },
     {
       title: "End Time",
       dataIndex: "endTime",
-      sorter: (a: TableData, b: TableData) =>
-        String(a.endTime || "").length - String(b.endTime || "").length,
+      sorter: (a: TableData, b: TableData) => {
+        const parseEnd = (row: TableData) => {
+          const o = (row as any)?.originalData || {};
+          if (o.end_time != null) {
+            const m = parsePgTimeToDayjs(String(o.end_time));
+            if (m?.isValid()) return m.hour() * 60 + m.minute();
+          }
+          const d = parseDisplayTimeToDayjs((row as any).endTime);
+          return d?.isValid() ? d.hour() * 60 + d.minute() : 0;
+        };
+        return parseEnd(a) - parseEnd(b);
+      },
     },
     {
       title: "Type",
@@ -615,7 +705,7 @@ const ScheduleClasses = () => {
         </span>
       ),
       sorter: (a: TableData, b: TableData) =>
-        String(a.status || "").length - String(b.status || "").length,
+        String(a.status || "").localeCompare(String(b.status || ""), undefined, { sensitivity: "base" }),
     },
     {
       title: "Action",
@@ -732,13 +822,41 @@ const ScheduleClasses = () => {
                           <div className="col-md-12">
                             <div className="mb-3">
                               <label className="form-label">Slot name</label>
-                              <input type="text" className="form-control" placeholder="e.g. Period 1" />
+                              <input
+                                type="text"
+                                className="form-control"
+                                placeholder="e.g. Period 1"
+                                value={filterSlotNameDraft}
+                                onChange={(e) => setFilterSlotNameDraft(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <div className="col-md-12">
+                            <div className="mb-3">
+                              <label className="form-label">Status</label>
+                              <CommonSelect
+                                className="select"
+                                options={STATUS_FILTER_OPTIONS}
+                                value={filterStatus}
+                                onChange={(v) => setFilterStatus(v || "__all__")}
+                              />
+                            </div>
+                          </div>
+                          <div className="col-md-12">
+                            <div className="mb-3">
+                              <label className="form-label">Type</label>
+                              <CommonSelect
+                                className="select"
+                                options={SLOT_TYPE_FILTER_OPTIONS}
+                                value={filterSlotType}
+                                onChange={(v) => setFilterSlotType(v || "__all__")}
+                              />
                             </div>
                           </div>
                         </div>
                       </div>
                       <div className="p-3 d-flex align-items-center justify-content-end">
-                        <Link to="#" className="btn btn-light me-3">
+                        <Link to="#" className="btn btn-light me-3" onClick={handleResetFilters}>
                           Reset
                         </Link>
                         <Link to="#" className="btn btn-primary" onClick={handleApplyClick}>
@@ -761,22 +879,50 @@ const ScheduleClasses = () => {
                   </Link>
                   <ul className="dropdown-menu p-3">
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1 active">
+                      <Link
+                        to="#"
+                        className={`dropdown-item rounded-1${tableSort === "nameAsc" ? " active" : ""}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setTableSort("nameAsc");
+                        }}
+                      >
                         Ascending
                       </Link>
                     </li>
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1">
+                      <Link
+                        to="#"
+                        className={`dropdown-item rounded-1${tableSort === "nameDesc" ? " active" : ""}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setTableSort("nameDesc");
+                        }}
+                      >
                         Descending
                       </Link>
                     </li>
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1">
-                        Recently Viewed
+                      <Link
+                        to="#"
+                        className={`dropdown-item rounded-1${tableSort === "none" ? " active" : ""}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setTableSort("none");
+                        }}
+                      >
+                        Default order
                       </Link>
                     </li>
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1">
+                      <Link
+                        to="#"
+                        className={`dropdown-item rounded-1${tableSort === "recentId" ? " active" : ""}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setTableSort("recentId");
+                        }}
+                      >
                         Recently Added
                       </Link>
                     </li>
@@ -807,7 +953,8 @@ const ScheduleClasses = () => {
               )}
               <Table
                 columns={columns}
-                dataSource={Array.isArray(data) ? data : []}
+                dataSource={displayData}
+                loading={loading}
                 Selection={true}
                 selectedRowKeys={selectedRowKeys}
                 onSelectionChange={(keys) => setSelectedRowKeys(keys)}

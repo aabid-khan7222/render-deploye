@@ -1,7 +1,7 @@
 const Joi = require('joi');
 const { executeTransaction, query } = require('../config/database');
 const { success, error } = require('../utils/responseHelper');
-const { getAuthContext, isAdmin, parseId, isTeacherRole } = require('../utils/accessControl');
+const { getAuthContext, isAdmin, parseId, isTeacherRole, isParentOrGuardianPortalRole } = require('../utils/accessControl');
 const { ROLES } = require('../config/roles');
 const { getParentsForUser } = require('../utils/parentUserMatch');
 const {
@@ -1260,13 +1260,15 @@ async function resolveStudentScopeByUser(ctx, targetStudentId = null) {
     );
     return enrichScopeFromAttendance(s.rows[0] || null);
   }
-  if (ctx.roleId === ROLES.PARENT || ctx.roleName === 'parent') {
+  // Parent + Guardian: wards resolved via guardians.user_id → student_guardian_links (canonical schema).
+  if (isParentOrGuardianPortalRole(ctx)) {
     const linked = await getParentsForUser(ctx.userId).catch(() => ({ studentIds: [] }));
     if (!linked.studentIds || linked.studentIds.length === 0) return null;
 
     let selectedId = linked.studentIds[0];
-    if (targetStudentId && linked.studentIds.includes(parseId(targetStudentId))) {
-      selectedId = parseId(targetStudentId);
+    const targetId = parseId(targetStudentId);
+    if (targetId && linked.studentIds.includes(targetId)) {
+      selectedId = targetId;
     }
 
     const sid = await resolveLatestLinkedStudentId(selectedId);
@@ -1280,37 +1282,6 @@ async function resolveStudentScopeByUser(ctx, targetStudentId = null) {
        LIMIT 1`,
       [sid]
     );
-    return enrichScopeFromAttendance(s.rows[0] || null);
-  }
-  if (ctx.roleId === ROLES.GUARDIAN || ctx.roleName === 'guardian') {
-    const gCols = ['s.id AS student_id'];
-    if (schema.studentHasClassId) gCols.push('s.class_id');
-    if (schema.studentHasSectionId) gCols.push('s.section_id');
-
-    let s = await query(
-      `SELECT ${gCols.join(', ')}
-       FROM guardians g
-       INNER JOIN students s ON s.id = g.student_id
-       WHERE g.user_id = $1
-         AND s.status = 'Active'
-       ORDER BY s.id DESC
-       LIMIT 1`,
-      [ctx.userId]
-    );
-    if (!s.rows.length) {
-      const linked = await getParentsForUser(ctx.userId).catch(() => ({ studentIds: [] }));
-      const sid = await resolveLatestLinkedStudentId(linked.studentIds?.[0]);
-      if (sid) {
-        s = await query(
-          `SELECT ${baseCols.join(', ')}
-           FROM students
-           WHERE id = $1
-             AND status = 'Active'
-           LIMIT 1`,
-          [sid]
-        );
-      }
-    }
     return enrichScopeFromAttendance(s.rows[0] || null);
   }
   return null;
@@ -1918,11 +1889,11 @@ async function listSelfExamOptions(req, res) {
     const schema = await getExamSchemaFlags();
     const selfStudent = await resolveStudentScopeByUser(ctx, req.query.student_id);
     let availableStudents = [];
-    if (ctx.roleId === ROLES.PARENT || ctx.roleName === 'parent') {
+    if (isParentOrGuardianPortalRole(ctx)) {
       const linked = await getParentsForUser(ctx.userId).catch(() => ({ parents: [] }));
       availableStudents = linked.parents.map(p => ({
         id: p.student_id,
-        name: `${p.student_first_name} ${p.student_last_name}`.trim(),
+        name: `${p.student_first_name || ''} ${p.student_last_name || ''}`.trim(),
         admission_no: p.admission_number,
         class_name: p.class_name,
         section_name: p.section_name
