@@ -25,6 +25,7 @@ const { loadActiveGradeScale, getGradeFromScale } = require('../utils/gradeScale
 const { hasColumn, hasTable } = require('../utils/schemaInspector');
 const { deleteFileIfExist } = require('../utils/fileDeleteHelper');
 const { lateralCurrentEnrollment, buildEnrollmentJoin } = require('../utils/studentEnrollmentSql');
+const { syncLatestLifecycleEnrollment } = require('../utils/studentLifecycleEnrollmentSync');
 const {
   enrichStudentHostel,
   enrichStudentTransport,
@@ -1383,23 +1384,16 @@ const updateStudent = async (req, res) => {
         assigned_fee_id,
         is_free,
       });
-      // Sync Lifecycle Ledger for corrections (Source of Truth)
-      // Only update the ADMISSION record if it is the latest one for this student
+      // Sync latest lifecycle enrollment (clears blocking homework/attendance FK rows when class/year changes)
       if (academic_year_id && class_id) {
-        await client.query(`
-          UPDATE student_lifecycle_ledger 
-          SET to_academic_year_id = $1, to_class_id = $2, to_section_id = $3, updated_at = NOW()
-          WHERE id = (
-            SELECT id FROM student_lifecycle_ledger 
-            WHERE student_id = $4 AND event_type = 'ADMISSION' 
-            ORDER BY event_date DESC, id DESC LIMIT 1
-          )
-        `, [
-          academic_year_id,
-          class_id,
-          finalSectionId || null,
-          id
-        ]);
+        const lifecycleSync = await syncLatestLifecycleEnrollment(client, Number(id), {
+          academicYearId: academic_year_id,
+          classId: class_id,
+          sectionId: finalSectionId,
+        });
+        if (lifecycleSync.warnings?.length) {
+          updateWarnings.push(...lifecycleSync.warnings);
+        }
 
         // Auto-assign fees for the updated student (in case class changed)
         const { autoAssignFeesToStudents } = require('./feesGroupController');
@@ -1453,6 +1447,20 @@ const updateStudent = async (req, res) => {
         message:
           'Guardian contacts for this student contain duplicate phone values. Please keep Father, Mother, and Guardian phone numbers unique.',
       });
+    }
+    if (error && error.code === '23503') {
+      const c = String(error.constraint || '').toLowerCase();
+      if (
+        c === 'fk_homework_recipient_lifecycle' ||
+        c === 'fk_homework_submission_lifecycle' ||
+        c === 'fk_student_attendance_context'
+      ) {
+        return res.status(409).json({
+          status: 'ERROR',
+          message:
+            'Cannot change class or academic year while this student has linked homework or attendance records. Use promotion for session changes, or contact support.',
+        });
+      }
     }
     const devMsg = process.env.NODE_ENV !== 'production' ? (error.message || 'Failed to update student') : 'Failed to update student';
     res.status(500).json({
