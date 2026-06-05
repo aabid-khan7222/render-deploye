@@ -539,7 +539,13 @@ const upsertStudentRecord = async (client, payload) => {
     return;
   }
 
-  const enrollment = await resolveStudentEnrollmentContext(client, entityId, classId, sectionId);
+  const enrollment = await resolveStudentEnrollmentContext(
+    client,
+    entityId,
+    classId,
+    sectionId,
+    payload.academicYearId ?? payload.academic_year_id ?? null
+  );
   if (!enrollment?.lifecycle_id || !enrollment?.class_id || !enrollment?.section_id || !enrollment?.academic_year_id) {
     throw makeHttpError(400, `No active enrollment found for student ID ${entityId}.`, 'VALIDATION_ERROR');
   }
@@ -807,8 +813,15 @@ const ensureTeacherStudentSectionAccess = async ({ userId, classId, sectionId, a
   return { ok: true, staffIds };
 };
 
-const resolveStudentEnrollmentContext = async (client, studentId, preferredClassId = null, preferredSectionId = null) => {
+const resolveStudentEnrollmentContext = async (
+  client,
+  studentId,
+  preferredClassId = null,
+  preferredSectionId = null,
+  academicYearId = null
+) => {
   const params = [studentId];
+  const enrollmentJoin = buildEnrollmentJoin('s.id', params, academicYearId);
   let filters = '';
   if (preferredClassId) {
     params.push(Number(preferredClassId));
@@ -826,7 +839,7 @@ const resolveStudentEnrollmentContext = async (client, studentId, preferredClass
        enr.section_id,
        csec.id AS class_section_id
      FROM students s
-     ${lateralCurrentEnrollment('s.id')}
+     ${enrollmentJoin}
      LEFT JOIN class_sections csec
        ON csec.class_id = enr.class_id
       AND csec.section_id = enr.section_id
@@ -885,24 +898,22 @@ const saveAttendance = async (req, res) => {
 
         const studentIds = [...new Set(records.map((record) => Number(record.entityId)).filter(Number.isFinite))];
         if (studentIds.length > 0) {
-          const scopeParams = [studentIds, access.staffIds];
+          const validateParams = [studentIds];
+          const enrollmentJoin = buildEnrollmentJoin('s.id', validateParams, bodyAcademicYearId);
+          validateParams.push(Number(classIdFromRecords), Number(sectionIdFromRecords));
+          const classIdParam = `$${validateParams.length - 1}`;
+          const sectionIdParam = `$${validateParams.length}`;
           const allowedRes = await query(
             `SELECT s.id
              FROM students s
-             ${lateralCurrentEnrollment('s.id')}
+             ${enrollmentJoin}
              WHERE s.id = ANY($1::int[])
                AND s.deleted_at IS NULL
                AND s.status = 'Active'
                AND enr.class_id IS NOT NULL
-               AND enr.class_id = $3
-               AND enr.section_id = $4
-               AND ${buildSectionTeacherScopeSql({
-                 classExpr: 'enr.class_id',
-                 sectionExpr: 'enr.section_id',
-                 academicYearExpr: 'enr.academic_year_id',
-                 staffIdsParamRef: '$2::int[]',
-               })}`,
-            [...scopeParams, Number(classIdFromRecords), Number(sectionIdFromRecords)]
+               AND enr.class_id = ${classIdParam}
+               AND enr.section_id = ${sectionIdParam}`,
+            validateParams
           );
 
           const allowedIds = new Set((allowedRes.rows || []).map((row) => Number(row.id)));
@@ -911,7 +922,7 @@ const saveAttendance = async (req, res) => {
             return errorResponse(
               res,
               403,
-              'You can only mark attendance for students in your assigned section.',
+              'One or more students are not enrolled in the selected class and section for this academic year.',
               'FORBIDDEN'
             );
           }
@@ -929,11 +940,18 @@ const saveAttendance = async (req, res) => {
       );
     }
 
+    let resolvedAcademicYearId = null;
+    if (entityType === 'student') {
+      resolvedAcademicYearId = await resolveAcademicYearId(bodyAcademicYearId);
+      if (!resolvedAcademicYearId) {
+        return errorResponse(res, 400, 'Academic year is required for student attendance.', 'ACADEMIC_YEAR_REQUIRED');
+      }
+    }
+
     await executeTransaction(async (client) => {
       const markedBy = Number(req.user?.staff_id) || null;
       const upsertRecord = upsertHandlers[entityType];
       let staffColumns = null;
-      let resolvedAcademicYearId = null;
       const salaryAssignmentByStaff = new Map();
 
       if (entityType === 'staff') {
