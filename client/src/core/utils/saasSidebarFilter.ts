@@ -1,4 +1,8 @@
 import type { SaasModulesMap } from './saasModuleKeys';
+import {
+  ACADEMIC_SIDEBAR_LABEL_TO_KEY,
+} from './saasAcademicSubmodules';
+import { isAcademicSubmoduleMenuVisible } from './saasModuleAccess';
 
 const SUBMENU_ITEM_MODULE: Record<string, string> = {
   'Fees Collection': 'fees',
@@ -30,6 +34,18 @@ function extrasAllows(
 ): boolean {
   if (!modules) return true;
   return keys.some((k) => modules[k]?.show_in_menu !== false);
+}
+
+function filterAcademicSubmenuItems(
+  items: any[],
+  modules: SaasModulesMap | undefined
+): any[] {
+  if (!modules) return items;
+  return (items || []).filter((item: any) => {
+    const subKey = ACADEMIC_SIDEBAR_LABEL_TO_KEY[item.label];
+    if (!subKey) return true;
+    return isAcademicSubmoduleMenuVisible(modules, subKey);
+  });
 }
 
 function filterSubmenuItems(
@@ -80,13 +96,19 @@ export function filterSidebarBySaasModules(sidebarData: any[], modules: SaasModu
         if (!items.length) return null;
         return { ...section, submenuItems: items };
       }
+      if (secKey === 'academic') {
+        if (modules.academic?.show_in_menu === false) {
+          return null;
+        }
+        const filteredItems = filterAcademicSubmenuItems(section.submenuItems, modules);
+        if (!filteredItems.length) return null;
+        return { ...section, submenuItems: filteredItems };
+      }
       if (secKey && secKey !== 'management') {
         const mod =
           secKey === 'peoples'
             ? modules.peoples
-            : secKey === 'academic'
-              ? modules.academic
-              : secKey === 'hrm'
+            : secKey === 'hrm'
                 ? modules.hrm
                 : secKey === 'accounts'
                   ? modules.accounts

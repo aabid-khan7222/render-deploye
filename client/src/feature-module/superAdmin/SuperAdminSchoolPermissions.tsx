@@ -6,7 +6,8 @@ import {
   selectSuperAdminAuthChecked,
   selectSuperAdminIsAuthenticated,
 } from '../../core/data/redux/superAdminAuthSlice';
-import { SAAS_MODULE_CATALOG, type SaasModulesMap, isSaasCoreModule } from '../../core/utils/saasModuleKeys';
+import { type SaasModulesMap } from '../../core/utils/saasModuleKeys';
+import SaasModuleMatrixTable from './SaasModuleMatrixTable';
 import { all_routes } from '../router/all_routes';
 import '../../style/icon/tabler-icons/webfont/tabler-icons.css';
 import './superAdminShell.css';
@@ -281,50 +282,7 @@ const SuperAdminSchoolPermissions = () => {
 
                 {modules && (
                   <div className="table-responsive rounded-3 border" style={{ borderColor: 'var(--sa-border)' }}>
-                    <table className="table table-sm mb-0">
-                      <thead className="table-light">
-                        <tr>
-                          <th className="ps-2">Module</th>
-                          <th className="text-center">Menu</th>
-                          <th className="text-center pe-2">Access</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {SAAS_MODULE_CATALOG.map(({ key, label }) => {
-                          const core = isSaasCoreModule(key);
-                          const m = modules[key];
-                          const menuOn = core || m?.show_in_menu !== false;
-                          const accOn = core || m?.route_accessible !== false;
-                          return (
-                            <tr key={key}>
-                              <td className="ps-2 small">
-                                <span className="fw-medium">
-                                  {label}
-                                  {core && (
-                                    <span className="badge bg-light text-muted ms-1">Core</span>
-                                  )}
-                                </span>
-                                <code className="d-block text-muted" style={{ fontSize: '0.7rem' }}>
-                                  {key}
-                                </code>
-                              </td>
-                              <td className="text-center">
-                                <span
-                                  className={`sa-perm-dot ${menuOn ? 'bg-success' : 'bg-secondary'}`}
-                                  title={menuOn ? 'Visible in menu' : 'Hidden from menu'}
-                                />
-                              </td>
-                              <td className="text-center pe-2">
-                                <span
-                                  className={`sa-perm-dot ${accOn ? 'bg-primary' : 'bg-secondary'}`}
-                                  title={accOn ? 'Route accessible' : 'Route locked (flag)'}
-                                />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    <SaasModuleMatrixTable modules={modules} mode="readonly" />
                   </div>
                 )}
               </>

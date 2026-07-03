@@ -2,6 +2,8 @@
  * Canonical SaaS module keys for plan defaults and school overrides.
  * Keep in sync with client/src/core/utils/saasModuleKeys.ts
  */
+const { ACADEMIC_SUBMODULE_KEYS } = require('./saasAcademicSubmoduleCatalog');
+
 const SAAS_MODULE_CATALOG = [
   { key: 'peoples', label: 'Peoples', description: 'Students, parents, guardians, teachers' },
   { key: 'academic', label: 'Academic', description: 'Years, classes, subjects, timetable, exams' },
@@ -21,7 +23,8 @@ const SAAS_MODULE_CATALOG = [
   { key: 'sports', label: 'Sports', description: 'Sports and players' },
 ];
 
-const SAAS_MODULE_KEYS = SAAS_MODULE_CATALOG.map((m) => m.key);
+const SAAS_TOP_LEVEL_MODULE_KEYS = SAAS_MODULE_CATALOG.map((m) => m.key);
+const SAAS_MODULE_KEYS = [...SAAS_TOP_LEVEL_MODULE_KEYS, ...ACADEMIC_SUBMODULE_KEYS];
 
 function defaultAllModulesTrue() {
   const o = {};
@@ -31,19 +34,9 @@ function defaultAllModulesTrue() {
   return o;
 }
 
-const SAAS_CORE_MODULE_KEYS = ['peoples', 'academic'];
-
-function enforceCoreModules(modulesMap) {
-  for (const k of SAAS_CORE_MODULE_KEYS) {
-    modulesMap[k] = { show_in_menu: true, route_accessible: true };
-  }
-  return modulesMap;
-}
-
 module.exports = {
   SAAS_MODULE_CATALOG,
+  SAAS_TOP_LEVEL_MODULE_KEYS,
   SAAS_MODULE_KEYS,
-  SAAS_CORE_MODULE_KEYS,
   defaultAllModulesTrue,
-  enforceCoreModules,
 };

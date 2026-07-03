@@ -6,6 +6,14 @@ export function guardSaasModule(moduleKey: SaasRoutableModuleKey, element: React
   return <SaasModuleRouteGuard moduleKey={moduleKey}>{element}</SaasModuleRouteGuard>;
 }
 
+export function guardPeoplesModule(element: ReactElement) {
+  return guardSaasModule('peoples', element);
+}
+
+export function guardAcademicModule(element: ReactElement) {
+  return guardSaasModule('academic', element);
+}
+
 export function guardHostelModule(element: ReactElement) {
   return guardSaasModule('hostel', element);
 }

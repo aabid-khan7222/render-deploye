@@ -5,8 +5,8 @@ import {
   selectSuperAdminAuthChecked,
   selectSuperAdminIsAuthenticated,
 } from '../../core/data/redux/superAdminAuthSlice';
-import { SAAS_MODULE_CATALOG, type SaasModulesMap, isSaasCoreModule } from '../../core/utils/saasModuleKeys';
-import { patchSaasModuleFlags } from './saasModuleUi';
+import { SAAS_MODULE_CATALOG, type SaasModulesMap } from '../../core/utils/saasModuleKeys';
+import SaasModuleMatrixTable from './SaasModuleMatrixTable';
 import { superAdminToast } from './superAdminToast';
 
 const BILLING_INTERVALS = [
@@ -147,8 +147,8 @@ const SuperAdminPlans = () => {
     }
   };
 
-  const updateFlag = (key: string, field: 'show_in_menu' | 'route_accessible', value: boolean) => {
-    setModules((prev) => (prev ? patchSaasModuleFlags(prev, key, field, value) : prev));
+  const updateModules = (next: SaasModulesMap) => {
+    setModules(next);
   };
 
   const saveModules = async () => {
@@ -430,57 +430,7 @@ const SuperAdminPlans = () => {
                 {modLoading && <p>Loading modules…</p>}
                 {!modLoading && selectedId != null && modules && (
                   <div className="table-responsive">
-                    <table className="table table-sm align-middle">
-                      <thead>
-                        <tr>
-                          <th>Module</th>
-                          <th>Menu</th>
-                          <th>Accessible</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {SAAS_MODULE_CATALOG.map(({ key, label }) => {
-                          const core = isSaasCoreModule(key);
-                          const menuOn = core || !!modules[key]?.show_in_menu;
-                          return (
-                            <tr key={key}>
-                              <td>
-                                {label}
-                                {core && (
-                                  <span className="badge bg-light text-muted ms-2">Core</span>
-                                )}
-                              </td>
-                              <td>
-                                <input
-                                  type="checkbox"
-                                  className="form-check-input"
-                                  checked={menuOn}
-                                  disabled={core}
-                                  title={core ? 'Included in every plan' : undefined}
-                                  onChange={(e) => updateFlag(key, 'show_in_menu', e.target.checked)}
-                                />
-                              </td>
-                              <td>
-                                <input
-                                  type="checkbox"
-                                  className="form-check-input"
-                                  checked={core || !!modules[key]?.route_accessible}
-                                  disabled={core || !menuOn}
-                                  title={
-                                    core
-                                      ? 'Included in every plan'
-                                      : menuOn
-                                        ? undefined
-                                        : 'Enable menu first'
-                                  }
-                                  onChange={(e) => updateFlag(key, 'route_accessible', e.target.checked)}
-                                />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    <SaasModuleMatrixTable modules={modules} mode="edit" onChange={updateModules} />
                   </div>
                 )}
               </div>

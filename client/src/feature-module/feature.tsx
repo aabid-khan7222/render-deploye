@@ -4,6 +4,7 @@ import Header from "../core/common/header";
 import Sidebar from "../core/common/sidebar";
 import DashboardGuard from "../core/components/DashboardGuard";
 import RoleGuard from "../core/components/RoleGuard";
+import SaasPathModuleGuard from "../core/components/SaasPathModuleGuard";
 import InactiveAccountScreen from "../core/components/InactiveAccountScreen";
 import ThemeSettings from "../core/common/theme-settings";
 import { useEffect, useState } from "react";
@@ -243,7 +244,9 @@ const Feature = () => {
             <Sidebar />
             <RoleGuard>
               <DashboardGuard>
-                <Outlet />
+                <SaasPathModuleGuard>
+                  <Outlet />
+                </SaasPathModuleGuard>
               </DashboardGuard>
             </RoleGuard>
             {!location.pathname.includes("layout") && <ThemeSettings />}
@@ -259,7 +262,9 @@ const Feature = () => {
             <Sidebar />
             <RoleGuard>
               <DashboardGuard>
-                <Outlet />
+                <SaasPathModuleGuard>
+                  <Outlet />
+                </SaasPathModuleGuard>
               </DashboardGuard>
             </RoleGuard>
             {!location.pathname.includes("layout") && <ThemeSettings />}

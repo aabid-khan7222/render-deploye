@@ -1,9 +1,4 @@
-/** Keep keys aligned with server/src/config/saasModuleCatalog.js */
-export const SAAS_CORE_MODULE_KEYS = ['peoples', 'academic'] as const;
-
-export function isSaasCoreModule(key: string): boolean {
-  return (SAAS_CORE_MODULE_KEYS as readonly string[]).includes(key);
-}
+import { ACADEMIC_SUBMODULE_KEYS } from './saasAcademicSubmodules';
 
 /** Keep keys aligned with server/src/config/saasModuleCatalog.js */
 export const SAAS_MODULE_CATALOG: { key: string; label: string }[] = [
@@ -24,6 +19,9 @@ export const SAAS_MODULE_CATALOG: { key: string; label: string }[] = [
   { key: 'content', label: 'Content & pages' },
   { key: 'sports', label: 'Sports' },
 ];
+
+export const SAAS_TOP_LEVEL_MODULE_KEYS = SAAS_MODULE_CATALOG.map((m) => m.key);
+export const ALL_SAAS_MODULE_KEYS = [...SAAS_TOP_LEVEL_MODULE_KEYS, ...ACADEMIC_SUBMODULE_KEYS];
 
 export type SaasModuleFlags = { show_in_menu: boolean; route_accessible: boolean };
 

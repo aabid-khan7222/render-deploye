@@ -17,6 +17,24 @@ const DEFAULT_META: ModuleMeta = {
 };
 
 const MODULE_META: Partial<Record<SaasRoutableModuleKey, ModuleMeta>> = {
+  peoples: {
+    icon: 'ti-users',
+    iconClass: 'saas-module-lock-overlay__icon-wrap--default',
+    benefits: [
+      'Students, parents, guardians & teachers',
+      'People directory and profiles',
+      'Enrollment and staff management',
+    ],
+  },
+  academic: {
+    icon: 'ti-school',
+    iconClass: 'saas-module-lock-overlay__icon-wrap--default',
+    benefits: [
+      'Academic years, classes & sections',
+      'Timetable, homework & examinations',
+      'Curriculum and grading tools',
+    ],
+  },
   hostel: {
     icon: 'ti-building-community',
     iconClass: 'saas-module-lock-overlay__icon-wrap--hostel',
@@ -145,12 +163,15 @@ const MODULE_META: Partial<Record<SaasRoutableModuleKey, ModuleMeta>> = {
   },
 };
 
-function getModuleMeta(moduleKey: SaasRoutableModuleKey): ModuleMeta {
-  return MODULE_META[moduleKey] ?? DEFAULT_META;
+function getModuleMeta(moduleKey: string): ModuleMeta {
+  if (moduleKey in MODULE_META) {
+    return MODULE_META[moduleKey as SaasRoutableModuleKey] ?? DEFAULT_META;
+  }
+  return DEFAULT_META;
 }
 
 type Props = {
-  moduleKey: SaasRoutableModuleKey;
+  moduleKey: string;
 };
 
 const SaasModuleLockPage = ({ moduleKey }: Props) => {
